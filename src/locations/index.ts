@@ -1,6 +1,8 @@
 import {
   createGrpcClient,
+  NotFoundError,
   type AdvancedIMessage,
+  type SharedFriendLocation,
   type SharedFriendLocationUpdated,
   type TypedEventStream,
 } from "@photon-ai/advanced-imessage/grpc";
@@ -17,7 +19,9 @@ export interface Fix {
 }
 
 export interface Locations {
-  /** Send the Find My request card into a chat. No-op without Find My. */
+  /** True when the user already shares with the line; seeds `latest` from that snapshot. */
+  isSharing(userId: string, address: string): Promise<boolean>;
+  /** Send the Find My request card into a chat. */
   request(chatId: string, address: string): Promise<void>;
   /** Latest fix seen for a user (for onboarding `HOME`). */
   latest(userId: string): Fix | undefined;
@@ -64,6 +68,7 @@ export async function createLocations(opts: LocationsOptions): Promise<Locations
   if (!opts.findMy) {
     return {
       ...base,
+      isSharing: async () => false,
       async request(chatId, address) {
         console.log(`[locations] (terminal) would send Find My request to ${address} in ${chatId}`);
       },
@@ -138,8 +143,32 @@ export async function createLocations(opts: LocationsOptions): Promise<Locations
 
   void watchLoop();
 
+  async function currentShare(address: string): Promise<SharedFriendLocation | undefined> {
+    try {
+      return await client.locations.get(address);
+    } catch (err) {
+      if (!(err instanceof NotFoundError)) console.warn("[locations] Find My lookup failed", err);
+      return undefined;
+    }
+  }
+
   return {
     ...base,
+    async isSharing(userId, address) {
+      const share = await currentShare(address);
+      if (!share) return false;
+      if (share.latitude !== undefined && share.longitude !== undefined) {
+        latestByUser.set(userId, {
+          lat: share.latitude,
+          lon: share.longitude,
+          accuracyM: share.accuracy,
+          shortAddress: share.shortAddress,
+          time: clock.now(),
+        });
+      }
+      console.log(`[locations] ${address} already shares location (${share.locationType})`);
+      return true;
+    },
     async request(chatId, address) {
       const receipt = await client.locations.request(chatId, address);
       console.log(

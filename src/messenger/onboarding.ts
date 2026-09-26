@@ -6,6 +6,8 @@ import type { Inbound, SpectrumMessenger } from "./spectrum.ts";
 const copy = {
   welcome:
     "Hi, I'm Nook. I walk you home at night.\n\nStep 1: share your location with me using the card below.",
+  welcomeAlreadyShared:
+    "Hi, I'm Nook. I walk you home at night.\n\nStep 1 is done: I can already see your location.",
   welcomeTerminal:
     "Hi, I'm Nook. I walk you home at night.\n\nStep 1: fake a location with /loc <lat> <lon>",
   askContact:
@@ -98,8 +100,13 @@ export function createInboundRouter(deps: RouterDeps) {
     if (messenger.provider === "terminal") {
       await reply(user, copy.welcomeTerminal);
     } else {
-      await reply(user, copy.welcome);
-      await locations.request(msg.chatId, user.handle);
+      if (await locations.isSharing(user.userId, user.handle)) {
+        confirmedFix.add(user.userId);
+        await reply(user, copy.welcomeAlreadyShared);
+      } else {
+        await reply(user, copy.welcome);
+        await locations.request(msg.chatId, user.handle);
+      }
     }
     await promptFor(user, nextStep(user));
   }
