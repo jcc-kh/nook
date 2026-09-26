@@ -5,24 +5,43 @@ import type { Inbound, SpectrumMessenger } from "./spectrum.ts";
 
 const copy = {
   welcome:
-    "Hi, I'm Nook. I walk you home at night. Share your location with me from the card below, then text:\ncontact +1XXXXXXXXXX codeword <word>",
+    "Hi, I'm Nook. I walk you home at night.\n\nStep 1: share your location with me using the card below.",
   welcomeTerminal:
-    "Hi, I'm Nook. Text: contact +1XXXXXXXXXX codeword <word>\nFake a location with: /loc <lat> <lon>",
-  askHome: "When you're at home, text HOME so I know where that is.",
+    "Hi, I'm Nook. I walk you home at night.\n\nStep 1: fake a location with /loc <lat> <lon>",
+  askContact:
+    "Step 2: who should I text if something seems wrong? Send me their phone number, like +1 555 123 4567.",
+  askCodeword: (contact: string) =>
+    `Step 3: pick a secret codeword. If you ever say it on a call with me, I'll quietly alert ${contact}. Send me one word, like pineapple.`,
+  askHome: "Last step: next time you're at home, text HOME so I know where that is.",
+  contactSaved: (contact: string) => `Got it. I'll text ${contact} if something's wrong.`,
+  codewordSaved: (word: string) => `Codeword "${word}" saved.`,
+  locationReceived: "Got your location, thanks.",
   homeSaved: "Home saved. You're all set. I'll check in when you walk at night.",
   homeNoFix:
     "I can't see your location yet. Make sure you're sharing it with me in Find My, then text HOME again.",
-  badContact: "That contact number didn't look right. Try: contact +15551234567",
+  badContact: "That number didn't look right. Send it with the area code, like +1 555 123 4567.",
 } as const;
+
+export type OnboardingStep = "contact" | "codeword" | "home" | "done";
+
+export function nextStep(user: UserRecord): OnboardingStep {
+  if (!user.contact) return "contact";
+  if (!user.codeword) return "codeword";
+  if (user.homeLat === undefined) return "home";
+  return "done";
+}
 
 export interface ParsedOnboarding {
   contact?: string;
   codeword?: string;
   home: boolean;
+  badContact: boolean;
 }
 
 const CONTACT_RE = /\bcontact\s+(\+?\d[\d\s().-]{6,}\d)/i;
 const CODEWORD_RE = /\bcodeword\s+([^\s,.;!?]+)/i;
+const BARE_PHONE_RE = /^\s*\+?[\d\s().-]*\d{3}[\d\s().-]*\s*$/;
+const BARE_WORD_RE = /^\s*([a-z][a-z'-]{1,29})\s*[.!]?\s*$/i;
 const HOME_RE = /^\s*home\s*[.!]?\s*$/i;
 const LOC_RE = /^\/loc\s+(-?\d+(?:\.\d+)?)[\s,]+(-?\d+(?:\.\d+)?)\s*$/i;
 
@@ -35,14 +54,22 @@ export function toE164(raw: string): string | null {
   return null;
 }
 
-export function parseOnboarding(text: string): ParsedOnboarding & { badContact: boolean } {
-  const contactRaw = text.match(CONTACT_RE)?.[1];
-  const contact = contactRaw ? toE164(contactRaw) : undefined;
-  const codeword = text.match(CODEWORD_RE)?.[1]?.toLowerCase();
+/**
+ * Explicit `contact …` / `codeword …` always work. While onboarding is waiting
+ * on a step, a bare phone number or a single word also answers it.
+ */
+export function parseOnboarding(text: string, step: OnboardingStep = "done"): ParsedOnboarding {
+  const home = HOME_RE.test(text);
+  let contactRaw = text.match(CONTACT_RE)?.[1];
+  if (!contactRaw && step === "contact" && BARE_PHONE_RE.test(text)) contactRaw = text;
+  let codeword = text.match(CODEWORD_RE)?.[1];
+  if (!codeword && !home && step === "codeword") codeword = text.match(BARE_WORD_RE)?.[1];
+
+  const contact = contactRaw ? toE164(contactRaw) : null;
   return {
     ...(contact && { contact }),
-    ...(codeword && { codeword }),
-    home: HOME_RE.test(text),
+    ...(codeword && { codeword: codeword.toLowerCase() }),
+    home,
     badContact: contactRaw !== undefined && !contact,
   };
 }
@@ -58,18 +85,26 @@ export interface RouterDeps {
 export function createInboundRouter(deps: RouterDeps) {
   const { messenger, locations, users, clock, dispatch } = deps;
   const reply = (user: UserRecord, text: string) => messenger.sendToUser(user.userId, text);
+  const confirmedFix = new Set<string>();
+
+  async function promptFor(user: UserRecord, step: OnboardingStep) {
+    if (step === "contact") await reply(user, copy.askContact);
+    else if (step === "codeword") await reply(user, copy.askCodeword(user.contact!));
+    else if (step === "home") await reply(user, copy.askHome);
+  }
 
   async function welcome(msg: Inbound) {
     const { user } = msg;
     if (messenger.provider === "terminal") {
       await reply(user, copy.welcomeTerminal);
-      return;
+    } else {
+      await reply(user, copy.welcome);
+      await locations.request(msg.chatId, user.handle);
     }
-    await reply(user, copy.welcome);
-    await locations.request(msg.chatId, user.handle);
+    await promptFor(user, nextStep(user));
   }
 
-  /** Returns true when the text was an onboarding command (not forwarded to brain). */
+  /** Returns true when the text was an onboarding answer (not forwarded to brain). */
   async function handleOnboardingText(user: UserRecord, text: string): Promise<boolean> {
     const loc = text.match(LOC_RE);
     if (loc && messenger.provider === "terminal") {
@@ -77,25 +112,25 @@ export function createInboundRouter(deps: RouterDeps) {
       return true;
     }
 
-    const parsed = parseOnboarding(text);
+    const parsed = parseOnboarding(text, nextStep(user));
     if (parsed.badContact) {
       await reply(user, copy.badContact);
       return true;
     }
 
-    const saved: string[] = [];
-    if (parsed.contact) {
-      await users.setContact(user.userId, parsed.contact);
-      saved.push(`emergency contact ${parsed.contact}`);
-    }
-    if (parsed.codeword) {
-      await users.setCodeword(user.userId, parsed.codeword);
-      saved.push(`codeword "${parsed.codeword}"`);
-    }
-    if (saved.length > 0) {
-      const fresh = await users.getById(user.userId);
-      const next = fresh?.homeLat === undefined ? ` ${copy.askHome}` : "";
-      await reply(user, `Saved ${saved.join(" and ")}.${next}`);
+    if (parsed.contact || parsed.codeword) {
+      const lines: string[] = [];
+      if (parsed.contact) {
+        await users.setContact(user.userId, parsed.contact);
+        lines.push(copy.contactSaved(parsed.contact));
+      }
+      if (parsed.codeword) {
+        await users.setCodeword(user.userId, parsed.codeword);
+        lines.push(copy.codewordSaved(parsed.codeword));
+      }
+      await reply(user, lines.join(" "));
+      const fresh = (await users.getById(user.userId)) ?? user;
+      await promptFor(fresh, nextStep(fresh));
       return true;
     }
 
@@ -113,7 +148,7 @@ export function createInboundRouter(deps: RouterDeps) {
     return false;
   }
 
-  return async function route(msg: Inbound): Promise<void> {
+  async function route(msg: Inbound): Promise<void> {
     if (msg.isNewUser) await welcome(msg);
 
     if (msg.kind === "reaction") {
@@ -137,5 +172,16 @@ export function createInboundRouter(deps: RouterDeps) {
       text: msg.text,
       time: clock.now(),
     });
-  };
+  }
+
+  /** First fix while still onboarding: tell the user sharing worked. */
+  async function onFix(userId: string): Promise<void> {
+    if (confirmedFix.has(userId)) return;
+    confirmedFix.add(userId);
+    const user = await users.getById(userId);
+    if (!user || nextStep(user) === "done") return;
+    await reply(user, copy.locationReceived);
+  }
+
+  return { route, onFix };
 }

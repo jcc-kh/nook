@@ -5,7 +5,7 @@ import { createLocations } from "./locations/index.ts";
 import { createInboundRouter } from "./messenger/onboarding.ts";
 import { createSpectrumMessenger, type Provider } from "./messenger/spectrum.ts";
 import { createMemoryUserStore } from "./store/index.ts";
-import type { Brain, Event } from "./shared/types.ts";
+import type { Brain, Event, LocationPing } from "./shared/types.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const brainMode = (process.env.BRAIN_MODE ?? "stub").toLowerCase();
@@ -31,16 +31,28 @@ async function dispatch(event: Event): Promise<void> {
   }
 }
 
+let router: ReturnType<typeof createInboundRouter> | undefined;
+
+async function onPing(ping: LocationPing): Promise<void> {
+  console.log(
+    `[locations] ${ping.userId} ${ping.lat.toFixed(5)},${ping.lon.toFixed(5)}`,
+    ping.shortAddress ?? "",
+  );
+  await router?.onFix(ping.userId).catch((err) => console.error("[nook] onFix failed", err));
+  await dispatch(ping);
+}
+
 const locations = await createLocations({
   users,
   clock,
-  onPing: dispatch,
+  onPing,
   ...(provider === "imessage" && projectId && projectSecret && {
     findMy: { projectId, projectSecret },
   }),
 });
 
-const route = createInboundRouter({ messenger, locations, users, clock, dispatch });
+router = createInboundRouter({ messenger, locations, users, clock, dispatch });
+const { route } = router;
 
 console.log(`[nook] PROVIDER=${provider}  BRAIN_MODE=${brainMode}  PORT=${port}`);
 

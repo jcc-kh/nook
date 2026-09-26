@@ -76,6 +76,7 @@ export async function createLocations(opts: LocationsOptions): Promise<Locations
     lastActivity = Date.now();
   });
   const lastSeqByAddress = new Map<string, number>();
+  const unknownAddresses = new Set<string>();
   let stopped = false;
   let current: TypedEventStream<SharedFriendLocationUpdated> | undefined;
 
@@ -85,7 +86,13 @@ export async function createLocations(opts: LocationsOptions): Promise<Locations
 
     if (location.latitude === undefined || location.longitude === undefined) return;
     const user = await users.getByHandle(location.address);
-    if (!user) return;
+    if (!user) {
+      if (!unknownAddresses.has(location.address)) {
+        unknownAddresses.add(location.address);
+        console.log(`[locations] ignoring Find My updates from ${location.address} (no user yet)`);
+      }
+      return;
+    }
 
     await emit(user.userId, {
       lat: location.latitude,
