@@ -1,5 +1,5 @@
 import type { Locations } from "../locations/index.ts";
-import type { Clock, Event } from "../shared/types.ts";
+import type { Clock, Event, SendTextTag } from "../shared/types.ts";
 import type { UserRecord, UserStore } from "../store/index.ts";
 import type { Inbound, SpectrumMessenger } from "./spectrum.ts";
 
@@ -39,6 +39,8 @@ export interface ParsedOnboarding {
   home: boolean;
   badContact: boolean;
 }
+
+const TRACKED_TAGS: SendTextTag[] = ["prompt", "checkin", "nudge", "arrived", "ended"];
 
 const CONTACT_RE = /\bcontact\s+(\+?\d[\d\s().-]{6,}\d)/i;
 const CODEWORD_RE = /\bcodeword\s+([^\s,.;!?]+)/i;
@@ -87,6 +89,8 @@ export interface RouterDeps {
 export function createInboundRouter(deps: RouterDeps) {
   const { messenger, locations, users, clock, dispatch } = deps;
   const reply = (user: UserRecord, text: string) => messenger.sendToUser(user.userId, text);
+  const log = (user: UserRecord, ...parts: string[]) =>
+    console.log(`[onboarding] ${user.userId} (${user.handle})`, ...parts);
   const confirmedFix = new Set<string>();
 
   async function promptFor(user: UserRecord, step: OnboardingStep) {
@@ -97,6 +101,7 @@ export function createInboundRouter(deps: RouterDeps) {
 
   async function welcome(msg: Inbound) {
     const { user } = msg;
+    log(user, "new user");
     if (messenger.provider === "terminal") {
       await reply(user, copy.welcomeTerminal);
     } else {
@@ -129,10 +134,12 @@ export function createInboundRouter(deps: RouterDeps) {
       const lines: string[] = [];
       if (parsed.contact) {
         await users.setContact(user.userId, parsed.contact);
+        log(user, `contact saved: ${parsed.contact}`);
         lines.push(copy.contactSaved(parsed.contact));
       }
       if (parsed.codeword) {
         await users.setCodeword(user.userId, parsed.codeword);
+        log(user, `codeword saved (${parsed.codeword.length} chars)`);
         lines.push(copy.codewordSaved(parsed.codeword));
       }
       await reply(user, lines.join(" "));
@@ -144,10 +151,16 @@ export function createInboundRouter(deps: RouterDeps) {
     if (parsed.home) {
       const fix = locations.latest(user.userId);
       if (!fix) {
+        log(user, "HOME received but no location fix yet");
         await reply(user, copy.homeNoFix);
         return true;
       }
       await users.setHome(user.userId, fix.lat, fix.lon);
+      const where = fix.shortAddress ? ` ${fix.shortAddress}` : "";
+      log(
+        user,
+        `home saved: ${fix.lat.toFixed(5)},${fix.lon.toFixed(5)}${where} (fix from ${fix.time.toISOString()})`,
+      );
       await reply(user, copy.homeSaved);
       return true;
     }
@@ -159,6 +172,9 @@ export function createInboundRouter(deps: RouterDeps) {
     if (msg.isNewUser) await welcome(msg);
 
     if (msg.kind === "reaction") {
+      const uid = msg.user.userId;
+      const tag = TRACKED_TAGS.find((t) => messenger.lastMessageId(uid, t) === msg.targetMessageId);
+      log(msg.user, `reacted ${msg.emoji} to ${tag ? `last "${tag}" message` : "an untracked message"}`);
       await dispatch({
         type: "UserReaction",
         userId: msg.user.userId,
