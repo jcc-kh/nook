@@ -78,7 +78,7 @@ async function shutdown() {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-// Sequential so one user's "contact …" then "HOME" can't race each other.
+// Sequential so one user's onboarding answers can't race each other.
 for await (const msg of messenger.inbound()) {
   try {
     await route(msg);

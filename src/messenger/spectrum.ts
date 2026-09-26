@@ -90,14 +90,15 @@ export async function createSpectrumMessenger(
   async function alertContact(userId: string, text: string, lat: number, lon: number) {
     const user = await users.getById(userId);
     const body = `${text}\n${mapsLink(lat, lon)}`;
-    if (!user?.contact) {
-      console.warn(`[messenger] AlertContact for ${userId} but no contact on file:\n${body}`);
+    const contact = user?.trustedContact;
+    if (!contact) {
+      console.warn(`[messenger] AlertContact for ${userId} but no trusted contact on file:\n${body}`);
       return;
     }
-    const space = await openDm(user.contact);
+    const space = await openDm(contact.phone);
     if (!space) {
       // Terminal has no second person to text; surface it in the log instead.
-      console.log(`[messenger] → contact ${user.contact}:\n${body}`);
+      console.log(`[messenger] → trusted contact ${contact.name ?? ""} ${contact.phone}:\n${body}`);
       return;
     }
     await space.send(body);
