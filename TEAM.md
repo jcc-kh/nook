@@ -35,19 +35,19 @@ Keep Claude’s edge-vs-brain split. Adjust these details so nobody blocks or do
 
 Do these in one sitting. Neither person starts module work until this lands on `main`.
 
-- [ ] Agree: Bun + TypeScript; package name `nook`; `PROVIDER=terminal|imessage`
-- [ ] Land [CONTEXT.md](CONTEXT.md) contract (already in repo) — both read it end-to-end
-- [ ] Create `src/shared/types.ts` exactly as in CONTEXT (events, actions, `WalkPhase`, `RuleId`, `WalkPlan`, `Brain`, `ParsedReply`)
-- [ ] Create `src/shared/clock.ts` — `SystemClock`, `SimClock` (`set`, `advance`); **forbid `Date.now()` in rules**
-- [ ] Create `src/shared/templates.ts` — prompt / check-in / nudge / arrived / ended / unclear strings
-- [ ] Empty `Brain.handle` → `[]` + log; empty `messenger.execute` stub
-- [ ] Agree onboarding utterances:
+- [x] Agree: Bun + TypeScript; package name `nook`; `PROVIDER=terminal|imessage`
+- [x] Land [CONTEXT.md](CONTEXT.md) contract (already in repo) — both read it end-to-end
+- [x] Create `src/shared/types.ts` exactly as in CONTEXT (events, actions, `WalkPhase`, `RuleId`, `WalkPlan`, `Brain`, `ParsedReply`)
+- [x] Create `src/shared/clock.ts` — `SystemClock`, `SimClock` (`set`, `advance`); **forbid `Date.now()` in rules**
+- [x] Create `src/shared/templates.ts` — prompt / check-in / nudge / arrived / ended / unclear strings
+- [x] Empty `Brain.handle` → `[]` + log; empty `messenger.execute` stub
+- [x] Agree onboarding utterances:
   - first text → create user
   - agent sends Find My `request` card
   - user: `contact +1… codeword <word>`
   - `HOME` while live fix → write `users.home`
   - night default `22:00–06:00` in `users.tz`
-- [ ] Env template `.env.example` (keys only, no secrets): Spectrum, Tiger, Gemini, ElevenLabs, tools secret, `PROVIDER`, `PORT`
+- [x] Env template `.env.example` (keys only, no secrets): Spectrum, Tiger, Gemini, ElevenLabs, tools secret, `PROVIDER`, `PORT`
 
 ---
 
