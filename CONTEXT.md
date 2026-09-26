@@ -2,6 +2,8 @@
 
 Shared contract for Dev A (edge) and Dev B (brain). Hackathon: 2 developers, ~20 hours. Demo reliability beats feature count. TypeScript / Bun. No LLM calls on the location-ping path.
 
+**Team to-do lists / ownership:** [TEAM.md](TEAM.md)
+
 ## Product
 
 An iMessage agent that walks users home at night. Users share Find My location with the agent's contact once. At night, when they start walking, the agent texts first ("Heading home? 👍"). During the walk it checks in only when something is unusual for that user, escalates to an emergency contact if they go quiet, and on ‼️ places a fake phone call from an AI "friend". The agent never contacts police itself.
