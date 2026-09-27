@@ -1,19 +1,50 @@
-import type { Action, Brain, Clock, Event, LiveContext } from "../shared/types.ts";
+import type { Brain, Clock } from "../shared/types.ts";
+import { createBrainEngine, type ParseReplyFn } from "./engine.ts";
+import type { UserRecord } from "../store/types.ts";
+import { createTigerUserStore } from "../store/users.ts";
+import { createLlm, type Llm } from "../llm/index.ts";
+import type { WriteMessages } from "../shared/types.ts";
 
 export interface CreateBrainOptions {
   clock: Clock;
+  getUser?: (userId: string) => Promise<UserRecord | null>;
+  parseReply?: ParseReplyFn;
+  writeMessages?: WriteMessages;
+  persist?: boolean;
+  verbose?: boolean;
+  /** Override; default from createLlm() / env. */
+  llm?: Llm;
 }
 
-/** Empty brain: logs events, returns no actions. Person B replaces with real rules. */
-export function createBrain(_opts: CreateBrainOptions): Brain {
-  return {
-    async handle(event: Event): Promise<Action[]> {
-      console.log("[brain:stub]", event.type, "userId=", event.userId);
-      return [];
-    },
+export function createBrain(opts: CreateBrainOptions): Brain & {
+  getPhase: (userId: string) => string;
+  getRuntime: (userId: string) => unknown;
+} {
+  const store = createTigerUserStore();
+  const getUser =
+    opts.getUser ??
+    (async (userId: string) => store.getById(userId));
 
-    async getLiveContext(_walkId: string): Promise<LiveContext | null> {
-      return null;
-    },
+  const llm = opts.llm ?? createLlm();
+
+  const engine = createBrainEngine({
+    clock: opts.clock,
+    getUser,
+    parseReply: opts.parseReply ?? llm.parseReply,
+    writeMessages: opts.writeMessages ?? llm.writeMessages,
+    persist: opts.persist ?? true,
+    verbose: opts.verbose ?? process.env.BRAIN_LOG !== "0",
+  });
+
+  return {
+    handle: engine.handle,
+    tick: engine.tick,
+    resetUser: engine.resetUser,
+    getLiveContext: engine.getLiveContext,
+    getPhase: engine.getPhase,
+    getRuntime: engine.getRuntime,
   };
 }
+
+export { createBrainEngine } from "./engine.ts";
+export { createEchoBrain } from "./stubEcho.ts";

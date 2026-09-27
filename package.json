@@ -6,10 +6,33 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "smoke": "bun run src/smoke.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "bun run src/scripts/migrate.ts",
+    "seed:user": "bun run src/scripts/seed-user.ts",
+    "user:reset": "bun run src/scripts/reset-user.ts",
+    "voice:setup": "bun run src/scripts/voice-setup.ts",
+    "seed:history": "bun run src/scripts/seed-history.ts",
+    "seed:f162": "bun run src/scripts/seed-f16234ba.ts",
+    "send:test": "bun run src/scripts/send-test.ts",
+    "sim:l1": "bun run src/sim/scenarios/l1.ts",
+    "sim:l2": "bun run src/sim/scenarios/l2.ts",
+    "sim:l3": "bun run src/sim/scenarios/l3.ts",
+    "sim:l4": "bun run src/sim/scenarios/l4.ts",
+    "sim:reachout": "bun run src/sim/scenarios/reachout.ts",
+    "sim:play": "bun run src/sim/interactive.ts",
+    "sim:personal": "bun run src/sim/scenarios/personal.ts",
+    "sim:live": "bun run src/scripts/sim-live.ts",
+    "events:tail": "bun run src/scripts/events-tail.ts"
+  },
+  "dependencies": {
+    "@google/genai": "^1.19.0",
+    "@photon-ai/advanced-imessage": "^2.2.0",
+    "pg": "^8.16.3",
+    "spectrum-ts": "^12.10.1"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/pg": "^8.15.5",
     "typescript": "^5.9.2"
   }
 }

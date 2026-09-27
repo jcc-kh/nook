@@ -45,6 +45,7 @@ Thumbs.db
 # Local tooling
 .ngrok/
 *.pem
+*.key
 
 # Optional local Docker / DO artifacts
 .docker/

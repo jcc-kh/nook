@@ -1,72 +1,83 @@
-/**
- * Onboarding writes Person A needs. Hour-0: in-memory no-op.
- * Person B replaces with Tiger-backed store in L1.
- */
+import type { UserPatch, UserRecord, UserStore } from "./types.ts";
+import { createTigerUserStore } from "./users.ts";
 
-export interface UserRecord {
-  userId: string;
-  handle: string; // E.164 or email used on iMessage
-  contact?: string;
-  codeword?: string;
-  homeLat?: number;
-  homeLon?: number;
-  nightStart?: string; // "22:00"
-  nightEnd?: string; // "06:00"
-  tz?: string;
+export type { UserPatch, UserRecord, UserStore } from "./types.ts";
+export { getPool, getDatabaseUrl, closePool, query, withClient } from "./db.ts";
+export {
+  createTigerUserStore,
+  upsertDemoUser,
+  insertLocationPing,
+  insertEvent,
+  countPings,
+  loadRecentPings,
+} from "./users.ts";
+export {
+  insertWalk,
+  updateWalkStatus,
+  getOpenWalk,
+  insertStop,
+  upsertPlaceLabel,
+  loadWalkBaselines,
+  loadKnownStops,
+  loadRouteCells,
+  loadUsualCells,
+  insertConfirmedCells,
+  listOpenWalkUserIds,
+  buildDefaultPlan,
+} from "./walks.ts";
+
+function applyPatch(row: UserRecord, patch: UserPatch): void {
+  Object.assign(row, patch);
+  if ("trustedContact" in patch) row.contact = patch.trustedContact?.phone;
 }
 
-export interface UserStore {
-  upsertUser(handle: string): Promise<UserRecord>;
-  setContact(userId: string, contactE164: string): Promise<void>;
-  setCodeword(userId: string, codeword: string): Promise<void>;
-  setHome(userId: string, lat: number, lon: number): Promise<void>;
-  getByHandle(handle: string): Promise<UserRecord | null>;
-  getById(userId: string): Promise<UserRecord | null>;
-}
-
+/** In-memory fallback (no DATABASE_URL / offline). */
 export function createMemoryUserStore(): UserStore {
   const byId = new Map<string, UserRecord>();
   const handleToId = new Map<string, string>();
   let seq = 0;
 
+  function row(userId: string): UserRecord {
+    const found = byId.get(userId);
+    if (!found) throw new Error(`unknown user ${userId}`);
+    return found;
+  }
+
   return {
     async upsertUser(handle: string): Promise<UserRecord> {
       const existingId = handleToId.get(handle);
       if (existingId) {
-        const row = byId.get(existingId);
-        if (row) return row;
+        const existing = byId.get(existingId);
+        if (existing) return existing;
       }
       seq += 1;
       const userId = `user-${seq}`;
-      const row: UserRecord = {
+      const created: UserRecord = {
         userId,
         handle,
         nightStart: "22:00",
         nightEnd: "06:00",
         tz: "America/New_York",
       };
-      byId.set(userId, row);
+      byId.set(userId, created);
       handleToId.set(handle, userId);
-      return row;
+      return created;
+    },
+
+    async updateUser(userId: string, patch: UserPatch): Promise<void> {
+      applyPatch(row(userId), patch);
     },
 
     async setContact(userId: string, contactE164: string): Promise<void> {
-      const row = byId.get(userId);
-      if (!row) throw new Error(`unknown user ${userId}`);
-      row.contact = contactE164;
-    },
-
-    async setCodeword(userId: string, codeword: string): Promise<void> {
-      const row = byId.get(userId);
-      if (!row) throw new Error(`unknown user ${userId}`);
-      row.codeword = codeword;
+      const r = row(userId);
+      r.contact = contactE164;
+      r.trustedContact = { ...(r.trustedContact ?? { phone: contactE164 }), phone: contactE164 };
     },
 
     async setHome(userId: string, lat: number, lon: number): Promise<void> {
-      const row = byId.get(userId);
-      if (!row) throw new Error(`unknown user ${userId}`);
-      row.homeLat = lat;
-      row.homeLon = lon;
+      const r = row(userId);
+      r.homeLat = lat;
+      r.homeLon = lon;
     },
 
     async getByHandle(handle: string): Promise<UserRecord | null> {
@@ -81,6 +92,8 @@ export function createMemoryUserStore(): UserStore {
   };
 }
 
-export function notImplementedStore(): never {
-  throw new Error("TODO: Person B — Tiger UserStore (src/store)");
+/** Tiger when DATABASE_URL is set (settings are real columns), otherwise in-memory. */
+export function createUserStore(): UserStore {
+  if (process.env.DATABASE_URL?.trim()) return createTigerUserStore();
+  return createMemoryUserStore();
 }

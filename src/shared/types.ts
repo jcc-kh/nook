@@ -35,13 +35,13 @@ export type RuleId =
   | "R10"
   | "R11"
   | "R12" // typed; unwired until L5
-  | "R13"
   | "R14"
   | "R15"
   | "R16";
 
 export type SendTextTag =
   | "prompt"
+  | "started"
   | "checkin"
   | "nudge"
   | "arrived"
@@ -78,11 +78,28 @@ export interface UserReaction {
   time: Date;
 }
 
+/**
+ * Call lifecycle from the voice agent. Picking up is not the same as being
+ * safe: only `resolved_safe` calls off a pending trusted-contact step.
+ * - `started`: the user answered; outcome still unknown.
+ * - `resolved_safe`: the user confirmed on the call that they're okay.
+ * - `request_escalation`: the user asked for their trusted contact to be reached.
+ * - `ended_unresolved`: hung up / dropped / unanswered / failed to place, without a safe outcome.
+ */
+export type CallOutcome = "started" | "resolved_safe" | "request_escalation" | "ended_unresolved";
+
+export const CALL_OUTCOMES: readonly CallOutcome[] = [
+  "started",
+  "resolved_safe",
+  "request_escalation",
+  "ended_unresolved",
+];
+
 export interface CallEvent {
   type: "CallEvent";
   userId: string;
   walkId: string;
-  callType: "started" | "ended" | "silent_alert";
+  callType: CallOutcome;
   time: Date;
 }
 
@@ -134,6 +151,10 @@ export interface LiveContext {
 export interface Brain {
   handle(event: Event): Promise<Action[]>;
   getLiveContext(walkId: string): Promise<LiveContext | null>;
+  /** Time-based rules (reply timers, no-update, lateness). Called every 30 s. */
+  tick?(now: Date): Promise<Action[]>;
+  /** Close any open walk and drop in-memory location state (dev sim stop). */
+  resetUser?(userId: string): Promise<void>;
 }
 
 // --- Walk plan (loaded once on enter WALKING) ---
