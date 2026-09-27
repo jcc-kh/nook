@@ -120,7 +120,7 @@ async function runPass(label: string, useGemini: boolean) {
   logActions("stationary 3m (expect checkin)", actions);
   console.log(`  phase=${brain.getPhase(DEMO.userId)}`);
 
-  // --- R9a: 👍 tapback on check-in → resume WALKING (no Gemini) ---
+  // --- 👍 on a stop check-in → they reached a place, walk ends ---
   const like: UserReaction = {
     type: "UserReaction",
     userId: DEMO.userId,
@@ -129,8 +129,18 @@ async function runPass(label: string, useGemini: boolean) {
     time: clock.now(),
   };
   actions = await brain.handle(like);
-  logActions("user tapback 👍 on check-in (R9a)", actions);
+  logActions("user tapback 👍 on stop check-in (settled)", actions);
   console.log(`  phase=${brain.getPhase(DEMO.userId)}`);
+
+  // A new explicit trip, so the late-walk demo still has something open.
+  actions = await brain.handle({
+    type: "UserText",
+    userId: DEMO.userId,
+    messageId: "wmh-2",
+    text: "walk me home",
+    time: clock.now(),
+  });
+  logActions("user: walk me home again", actions);
 
   // --- late walk → R7 check-in ---
   clock.advance(45 * 60_000);

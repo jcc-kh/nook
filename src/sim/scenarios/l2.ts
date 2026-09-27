@@ -270,8 +270,12 @@ async function main() {
       targetMessageId: "c1",
       time: clock.now(),
     };
-    await brain.handle(like);
-    assert(brain.getPhase(DEMO.userId) === "WALKING", "R9a: WALKING");
+    const acked = await brain.handle(like);
+    assert(brain.getPhase(DEMO.userId) === "IDLE", "R9a: stop ack ends the walk");
+    assert(
+      acked.some((a) => a.type === "SendText" && a.tag === "ended"),
+      "R9a: tells them we'll assume they got where they were going",
+    );
     console.log("R9a ok");
   }
 

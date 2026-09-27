@@ -8,7 +8,7 @@ import { closePool, query } from "../../store/db.ts";
 import { upsertDemoUser, countPings } from "../../store/users.ts";
 import { DEMO, DEMO_ORIGIN } from "../demo.ts";
 import { playRoute, walkingPoints } from "../playback.ts";
-import type { Action, LocationPing, UserText } from "../../shared/types.ts";
+import type { Action, LocationPing, UserReaction, UserText } from "../../shared/types.ts";
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
@@ -79,7 +79,7 @@ async function main() {
   assert(afterR1 > before, "R1: expected pings to increase");
   console.log("R1 ok");
 
-  // --- R2 night auto-start (no 👍 required) ---
+  // --- R2 night, away from home: ask "heading home?" (does not start the walk) ---
   // Stay >150 m from home the whole time (home - 0.003 ≈ 333 m)
   const farOrigin = { lat: DEMO.homeLat - 0.004, lon: DEMO.homeLon };
   const walkPts = walkingPoints(
@@ -107,15 +107,19 @@ async function main() {
       promptActions.push(...(await brain.handle(ping)));
     },
   });
-  const starts = promptActions.filter(
-    (a) => a.type === "SendText" && a.tag === "started",
+  const prompts = promptActions.filter(
+    (a) => a.type === "SendText" && a.tag === "prompt",
   );
-  assert(starts.length === 1, `R2: expected 1 started, got ${starts.length}`);
-  assert(brain.getPhase(DEMO.userId) === "WALKING", "R2: expected WALKING");
+  assert(prompts.length === 1, `R2: expected 1 prompt, got ${prompts.length}`);
+  assert(
+    prompts.every((a) => a.type === "SendText" && /heading home/i.test(a.text)),
+    "R2: prompt should ask if they're heading home",
+  );
+  assert(brain.getPhase(DEMO.userId) === "PROMPTED", "R2: expected PROMPTED");
   assert((await countRule("R2")) >= 1, "R2: events row missing");
   console.log("R2 ok");
 
-  // R2 again while already walking — no second start
+  // Still out, already asked — no second prompt
   clock.advance(5 * 60_000);
   const again = await brain.handle({
     type: "LocationPing",
@@ -125,10 +129,10 @@ async function main() {
     lon: farOrigin.lon,
   });
   assert(
-    again.filter((a: Action) => a.type === "SendText" && a.tag === "started").length === 0,
-    "R2: second start while already walking",
+    again.filter((a: Action) => a.type === "SendText" && (a.tag === "prompt" || a.tag === "started")).length === 0,
+    "R2: second prompt while already asked",
   );
-  console.log("R2 no-double-start ok");
+  console.log("R2 no-double-prompt ok");
   await brain.resetUser(DEMO.userId);
 
   // --- R2x vehicle ---
@@ -177,7 +181,16 @@ async function main() {
       await brain3.handle(ping);
     },
   });
-  assert(brain3.getPhase(DEMO.userId) === "WALKING", "R3 setup: WALKING after night start");
+  assert(brain3.getPhase(DEMO.userId) === "PROMPTED", "R3 setup: asked after night movement");
+  const yes: UserReaction = {
+    type: "UserReaction",
+    userId: DEMO.userId,
+    emoji: "👍",
+    targetMessageId: "r2-yes",
+    time: clock.now(),
+  };
+  await brain3.handle(yes);
+  assert(brain3.getPhase(DEMO.userId) === "WALKING", "R3 setup: WALKING after 👍");
   // Simulate a restart: new engine hydrates the same open walk after it's past lateMin
   const rt = brain3.getRuntime(DEMO.userId);
   const lateMin = rt.plan?.lateMin ?? 20;

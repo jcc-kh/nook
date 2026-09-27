@@ -12,13 +12,18 @@ Nook already lives in iMessage. You share Find My once. It learns the routes, st
 
 ## What Nook does
 
-You text Nook once. It walks you through setup in the same thread: your name, a trusted contact, when it should watch (only trips you start, evenings, or whenever you are away from home), and what to do if a check-in goes unanswered (call you, text your contact, both, or one last nudge). It asks you to share Find My, then asks if you are home so it can save that point.
+You text Nook once. It walks you through setup in the same thread: your name, a trusted contact, when it should watch, and what to do if a check-in goes unanswered. It asks you to share Find My, then asks if you are home so it can save that point. "Walk me home" (or "heading out", "on my way", "leaving now") starts a walk any time. Driving speed is ignored.
 
-After that:
+When it reaches out on its own:
 
-- **It notices you heading out.** On a watched evening, a couple of minutes of walking away from home gets one text: "heading home?" A thumbs-up starts the walk. "Walk me home" starts one any time of day. Driving speed is ignored.
+- **Only when you say so.** Nook stores location and sends nothing until you start a trip.
+- **Evenings, and only if you are not home.** From 10pm to 6am, once you have been more than 150 meters from home for about two minutes, Nook asks "heading home?" Yes or 👍 starts the walk. Home at night is quiet, and so is sitting in a car.
+- **Away from home, only while you are moving.** Sitting still somewhere that is not home is treated as safe, so Nook stays quiet. After about two minutes of walking it watches without texting. If you were moving and then stop for a few minutes, it checks in. Ok or 👍 means you got where you were going, and it leaves you alone until you leave that spot. "Still on my way" keeps the walk going.
+
+After a walk is open:
+
 - **It stays quiet when the walk looks like yours.** A stop at a place you usually stop (the corner bodega, a friend's) is silent until you have been there longer than you usually are. A walk that ends at a friend's place closes quietly.
-- **It checks in when the walk does not.** Standing still somewhere new, drifting off the cells you usually walk, running later than your typical trip, or the phone going silent all produce one short text. A thumbs-up or "i'm good" resumes the walk. Saying where you are ("at Sam's") saves that place so the next visit is expected.
+- **It checks in when the walk does not.** A few minutes stopped, a stretch off the cells you usually walk, a trip running later than usual, or a phone that goes quiet each get one short text. Ok on a stop means you arrived on purpose. Ok on the others means you are fine and the walk continues. Saying where you are ("at Sam's") saves that place so the next visit is expected.
 - **Silence has a next step you picked.** One nudge, then the action from setup. The nudge tells you what that action is and when it happens. A safety floor always takes that step: an unanswered check-in, a location that stops updating, a "help" reply, or ‼️ / "call me". Your settings choose *which* action, and the floor always acts.
 - **A call is a friend, not a recording.** ‼️, "call me", or an unanswered check-in (if you asked to be called) rings your phone. The voice knows your name, the street, and how long you have been walking. It can look up where you are right now, keep you company, or play along as a cover call. If you ask it to reach your contact, or the call ends without a clear "I'm okay", that person gets one text with your last location. Picking up is not the same as being safe.
 - **Home is a text to you.** Two fixes near home close the walk: "home safe." Your contact is not told you arrived, and they are not told if you ended the night somewhere else on purpose.

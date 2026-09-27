@@ -22,6 +22,11 @@ export const templates = {
   unclear: "didn't catch that. are you okay, feeling uneasy, want me to call, or in immediate danger?",
   checkinOffRoute: "this isn't your usual way home. all good? or tell me where you're headed",
   checkinNoUpdate: "haven't seen your location in a bit. you ok?",
+  /** They were moving, then stayed in one spot. 👍 / ok means they arrived on purpose. */
+  stoppedCheckin:
+    "you've been in one spot for a few minutes. reply ok if you're where you want to be, or say you're still on your way",
+  stoppedDone: "cool, i'll assume you got where you were going. text walk me home if you head out",
+  stillGoing: "ok, still with you. i'll check in again if you stop for a bit",
   finalNudge: "still nothing. reply ok when you can, or text stop and i'll back off",
   /** After they 👍'd a dwell check-in but are still parked away from home. */
   lingerOffer:

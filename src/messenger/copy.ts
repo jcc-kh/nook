@@ -24,8 +24,8 @@ export const escalationOptions: NoResponseAction[] = ["CONTACT_TRUSTED", "NONE"]
 
 const monitoringLabel: Record<MonitoringMode, string> = {
   MANUAL: "only when you start a trip",
-  EVENINGS: "evenings",
-  AWAY_FROM_HOME: "whenever you're away from home",
+  EVENINGS: "evenings, when you're not home",
+  AWAY_FROM_HOME: "when you're out and moving",
 };
 
 /** User's voice, used in the settings summary. */
@@ -76,10 +76,10 @@ function monitoringPlan(user: UserRecord): string {
     case "MANUAL":
       return "i'll only watch when you ask. text 'walk me home' or 'heading out' when you leave.";
     case "AWAY_FROM_HOME":
-      return "i'll keep an eye on things whenever you're away from home. you can also text 'walk me home' anytime.";
+      return "if you're away from home and moving, i'll watch quietly. if you were moving and then stop for a few minutes, i'll check in. reply ok if you got where you were going. you can also text 'walk me home' anytime.";
     case "EVENINGS":
     default:
-      return `i'll keep an eye on your trips in the evenings (${clockLabel(user.nightStart ?? "22:00")}-${clockLabel(user.nightEnd ?? "06:00")}). you can also text 'walk me home' anytime.`;
+      return `in the evenings (${clockLabel(user.nightStart ?? "22:00")}-${clockLabel(user.nightEnd ?? "06:00")}), if you're not home, i'll ask if you're heading home. you can also text 'walk me home' anytime.`;
   }
 }
 
@@ -109,7 +109,7 @@ export const copy = {
     c.name ? `got it, ${c.name} is your trusted contact.` : "got it, your trusted contact is saved.",
 
   askMonitoring:
-    "when should i keep an eye on your location?\n1. only when i tell nook i'm heading somewhere\n2. during evenings / nighttime\n3. whenever i'm away from home",
+    "when should i keep an eye on your location?\n1. only when i tell nook i'm heading somewhere\n2. evenings, if i'm not home\n3. whenever i'm away from home and moving",
 
   askEscalation: (c?: TrustedContact) =>
     `if something seems unusual, i'll check in with you by text first.\n\nif i check in and can't confirm you're okay:\n1. text ${theirs(c)} my location\n2. just keep checking in with me\n\n(immediate danger is different: if you tap ‼️ or tell me you're in danger, i'll always text ${yours(c)} right away.)`,
@@ -226,7 +226,7 @@ export const copy = {
     "i can't see your location right now. make sure location sharing with me is on, then text 'home' again.",
 
   greetingIdle:
-    "hey, text me 'walk me home' when you head out, or i'll notice if you start walking at night. text 'stop' anytime to dismiss me",
+    "hey. text 'walk me home' when you head out. in the evenings, if you're not home, i'll ask if you're heading home. text 'stop' anytime to dismiss me",
   greetingPrompted: "still waiting. reply yes to start the walk, or text 'stop' if you're not heading out",
   greetingWalking: "hey, still with you on this trip. text 'stop' if you don't need me, or text if you need anything",
   idleUnclear: "i can walk you home, or text 'settings'. didn't catch a trip in that",
