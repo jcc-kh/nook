@@ -6,9 +6,9 @@ Nook is an iMessage agent that walks you home at night. It learns what a normal 
 
 Getting home at night in a city is a safety problem that existing tools handle badly.
 
-Sharing your location with a friend only helps if they are awake and watching. A generic safety app that pings on every pause trains you to ignore it, because a bodega stop and a real problem look the same to an app that does not know you. Calling 911, or texting a contact "are you home yet?" on every walk, is the wrong default for a trip that is usually fine.
+Sharing your location with a friend only helps if they are awake and watching. Safety apps split into two failures. One kind makes you start the session yourself: open the app, arm a timer, remember to check in. That is effort at the moment you are least likely to take it, so on an ordinary night nothing is watching. The other kind runs in the background and mostly surveils. It keeps a live dot and waits for someone else to notice. It does not learn your route, and it does not take the next step on its own. The few that do act tend to escalate on the first pause, so a bodega stop pages your contact and you stop trusting the app.
 
-What people actually need is a watcher that already lives in the thread they use, stays quiet on a normal walk, and escalates in the way *they* chose when the walk stops looking like theirs.
+Nook already lives in iMessage. You share Find My once. It learns the routes, stops, and timing that are usual for you, and it moves first when a walk leaves that pattern: a short text, then the call or the contact you chose. A familiar stop stays quiet. Your contact is texted when something is actually wrong.
 
 ## What Nook does
 
@@ -28,50 +28,26 @@ Every decision on a location update is deterministic code. A model never sits on
 
 ## How the pieces fit
 
-One Bun process. Photon owns the phone. Tiger owns memory of past walks. The brain turns pings and texts into actions. Gemini writes and reads language. ElevenLabs is the voice that can ring you.
+One process. Four services around it.
 
 ```mermaid
-flowchart TB
+flowchart LR
   phone[iPhone]
-
-  subgraph photon [Photon]
-    spectrum[Spectrum<br/>iMessage texts and tapbacks]
-    findmy[Advanced iMessage kit<br/>Find My live stream]
-  end
-
-  subgraph nook [Nook — one process]
-    router[Onboarding and settings]
-    brain[Rules brain and 30s ticker]
-    hooks["/tools"]
-  end
-
-  tiger[(Tiger Cloud<br/>TimescaleDB + PostGIS)]
+  photon[Photon<br/>iMessage and Find My]
+  nook[Nook]
+  tiger[(Tiger<br/>your usual route)]
   gemini[Gemini]
-  eleven[ElevenLabs agent]
+  eleven[ElevenLabs]
 
-  phone <-->|iMessage| spectrum
-  phone -->|Find My, shared once| findmy
-  spectrum --> router --> brain
-  findmy --> brain
-  brain <-->|pings, walks, baselines, events| tiger
-  gemini <-->|write texts, parse replies| brain
-  brain -->|SendText and AlertContact| spectrum
-  spectrum -->|only when something is wrong| contact[Trusted contact]
-  brain -->|StartCall| hooks
-  hooks -->|outbound call| eleven
-  eleven -->|rings| phone
-  eleven -->|where are they, and how did it end| hooks
+  phone <--> photon
+  photon <--> nook
+  nook <--> tiger
+  nook <--> gemini
+  nook --> eleven
+  eleven -->|call| phone
 ```
 
-A walk, end to end:
-
-1. Spectrum delivers the text or tapback. The router handles setup and settings itself. Anything else becomes an event for the brain.
-2. The Find My watch emits a location ping. The brain stores it, then runs rules against a five-minute window and a walk plan loaded once from Tiger.
-3. Find My only sends a point when the phone moves, so a 30-second ticker runs the time-based rules (no reply, no update, late, stopped) without waiting for the next ping.
-4. The brain returns actions: text you, text your contact, or start a call. The messenger sends them in order.
-5. A call goes out through the ElevenLabs agent, which rings the phone and calls back into `/tools/location` and `/tools/call-outcome`. Those outcomes re-enter the brain as events, so a pending "text my contact" step still fires if the call never reaches "I'm okay".
-
-Phase is kept in memory and on the walk row, so a restart resumes an open walk from Tiger. The process is one instance on purpose: the ping window and the Find My stream cannot be split across replicas.
+Photon carries the texts, tapbacks, and live location. Nook decides what to do. Tiger supplies the route, stops, and timing that count as normal. Gemini writes the texts and reads free-text replies. ElevenLabs places the call and reports how it ended, so a missed "I'm okay" still reaches your contact.
 
 ## Why each sponsor's stack is the product
 

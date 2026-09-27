@@ -44,6 +44,7 @@ import {
   upsertPlaceLabel,
 } from "../store/walks.ts";
 import { copy } from "../messenger/copy.ts";
+import { query } from "../store/db.ts";
 import { voiceConfigFromEnv } from "../voice/index.ts";
 
 const WINDOW_MS = 5 * 60_000;
@@ -146,6 +147,8 @@ interface UserRuntime {
    * instead of firing a worried R7 check-in.
    */
   softRejoinPending: boolean;
+  /** This walk already texted the trusted contact. Later steps must not text them again. */
+  contactAlerted: boolean;
   pendingActions: Action[];
 }
 
@@ -183,6 +186,7 @@ function emptyRuntime(): UserRuntime {
     friendSince: null,
     contactAfterCall: null,
     softRejoinPending: false,
+    contactAlerted: false,
     pendingActions: [],
   };
 }
@@ -277,10 +281,11 @@ function noResponseAction(user: UserRecord): NoResponseAction {
   return user.trustedContact || user.contact ? "CONTACT_TRUSTED" : "NONE";
 }
 
-/** How the trusted contact knows who the alert is about. */
+/** How the trusted contact knows who the alert is about: their name, when we have one. */
 function userLabel(user: UserRecord): string {
-  const phone = prettyPhone(user.handle);
-  return user.displayName ? `${user.displayName} (${phone})` : phone;
+  const name = user.displayName?.trim();
+  if (name && !/^\+?\d[\d\s().-]{5,}\d$/.test(name) && !/^change my name$/i.test(name)) return name;
+  return prettyPhone(user.handle);
 }
 
 /** "+16463220667" → "+1 646-322-0667"; other handles unchanged. */
@@ -367,7 +372,13 @@ function alert(
   text: string,
   lat: number,
   lon: number,
-): Action {
+  force = false,
+): Action | null {
+  if (rt.contactAlerted && !force) {
+    console.log(`[brain] skip duplicate contact alert for ${userId}`);
+    return null;
+  }
+  rt.contactAlerted = true;
   const action: Action = { type: "AlertContact", userId, text, lat, lon };
   rt.pendingActions.push(action);
   return action;
@@ -518,6 +529,7 @@ async function beginWalk(
   rt.knownStopSince = null;
   rt.friendSince = null;
   rt.awayPings = 0;
+  rt.contactAlerted = false;
 
   if (deps.writeMessages) {
     try {
@@ -589,6 +601,7 @@ async function endWalk(
   rt.stationaryAckedAt = null;
   rt.contactAfterCall = null;
   rt.softRejoinPending = false;
+  rt.contactAlerted = false;
 }
 
 interface UsualCells {
@@ -673,11 +686,23 @@ export function createBrainEngine(deps: BrainDeps) {
         rt.checkinKind = null;
         rt.nudged = false;
         rt.escalated = false;
-        rt.softRejoinPending = true;
         rt.suppressCheckinUntil = new Date(now.getTime() + CHECKIN_SNOOZE_MS);
+        let alreadyRejoined = false;
+        try {
+          const prev = await query(
+            `SELECT 1 FROM events WHERE walk_id = $1 AND detail->>'step' = 'soft_rejoin' LIMIT 1`,
+            [open.walkId],
+          );
+          alreadyRejoined = prev.rows.length > 0;
+        } catch {
+          /* a failed lookup still sends the one rejoin text */
+        }
+        rt.softRejoinPending = !alreadyRejoined;
         brainLog(
           deps,
-          `soft-rejoin ${open.walkId} for ${userId} (was ${elapsedMin.toFixed(0)}m / late=${lateMin}m)`,
+          alreadyRejoined
+            ? `soft-rejoin ${open.walkId} for ${userId} already sent; resuming quietly`
+            : `soft-rejoin ${open.walkId} for ${userId} (was ${elapsedMin.toFixed(0)}m / late=${lateMin}m)`,
         );
       } else {
         brainLog(deps, `resumed ${open.walkId} (${rt.phase}) for ${userId}`);
@@ -1333,6 +1358,9 @@ export function createBrainEngine(deps: BrainDeps) {
         }
         rt.phase = "CALLING";
         rt.contactAfterCall = null;
+        rt.checkinOpenedAt = null;
+        rt.nudged = false;
+        rt.escalated = true;
         // Help always texts the trusted contact. Only place a call when voice is configured —
         // otherwise StartCall used to fail and stack callFailed + a second contact attempt.
         if (voiceConfigFromEnv()) {
@@ -1347,6 +1375,7 @@ export function createBrainEngine(deps: BrainDeps) {
           contactAlert("help", userLabel(user)),
           last?.lat ?? user.homeLat ?? 0,
           last?.lon ?? user.homeLon ?? 0,
+          true,
         );
         brainLog(deps, "parseReply → help escalate=contact");
         await logRule(deps, user.userId, "R9b", rt.walkId, {

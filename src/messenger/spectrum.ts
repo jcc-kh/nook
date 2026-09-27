@@ -109,7 +109,11 @@ export async function createSpectrumMessenger(
   const lastAlerts = new Map<string, ContactAlertResult>();
   /** Drop identical back-to-back sends (Spectrum / reconnect weirdness). */
   const recentSend = new Map<string, { text: string; at: number }>();
-  const SEND_DEDUP_MS = 8_000;
+  const SEND_DEDUP_MS = 30_000;
+  /** Inbound message ids already handled. Stream reconnects can redeliver the same one. */
+  const seenInbound = new Set<string>();
+  const recentInbound = new Map<string, number>();
+  const INBOUND_DEDUP_MS = 8_000;
 
   async function openDm(handle: string): Promise<Space | undefined> {
     if (!imApp) return undefined;
@@ -149,7 +153,14 @@ export async function createSpectrumMessenger(
         // never fall through to a second main-chat send or the user gets doubles.
         return sent?.id ? { messageId: sent.id } : {};
       } catch (err) {
-        console.warn(`[messenger] threaded reply to ${userId} failed; sending in the main chat`, err);
+        const msg = err instanceof Error ? err.message : String(err);
+        // These throw inside reply() before anything is delivered.
+        const beforeSend = /reply\(\) (target is undefined|requires content|cannot wrap)/.test(msg);
+        if (!beforeSend) {
+          console.warn(`[messenger] threaded reply to ${userId} failed; not sending a second copy`, err);
+          return {};
+        }
+        console.warn(`[messenger] threaded reply to ${userId} failed before send; sending in the main chat`, err);
       }
     }
     const sent = await space.send(text);
@@ -167,6 +178,13 @@ export async function createSpectrumMessenger(
     }
     const record = (ok: boolean) =>
       lastAlerts.set(userId, { ok, at: Date.now(), ...(contact.name && { name: contact.name }) });
+    const prevAlert = recentSend.get(`alert:${contact.phone}`);
+    const now = Date.now();
+    if (prevAlert && prevAlert.text === body && now - prevAlert.at < SEND_DEDUP_MS) {
+      console.log(`[messenger] dedup skip duplicate alert → ${contact.phone}`);
+      return;
+    }
+    recentSend.set(`alert:${contact.phone}`, { text: body, at: now });
     try {
       const space = await openDm(contact.phone);
       if (!space) {
@@ -238,11 +256,22 @@ export async function createSpectrumMessenger(
     }
   }
 
+  function rememberInbound(id: string): boolean {
+    if (seenInbound.has(id)) return true;
+    seenInbound.add(id);
+    if (seenInbound.size > 500) {
+      const oldest = seenInbound.values().next().value;
+      if (oldest) seenInbound.delete(oldest);
+    }
+    return false;
+  }
+
   async function* inbound(): AsyncIterable<Inbound> {
     for await (const [space, message] of app.messages) {
       if (message.direction === "outbound") continue;
       const handle = message.sender?.id;
       if (!handle) continue;
+      if (rememberInbound(message.id)) continue;
 
       const existing = await users.getByHandle(handle);
       const user = existing ?? (await users.upsertUser(handle));
@@ -257,6 +286,14 @@ export async function createSpectrumMessenger(
       const text = textOf(content);
       if (text === undefined) {
         console.log(`[messenger] ignoring ${content.type} message from ${user.userId}`);
+        continue;
+      }
+      const inboundKey = `${handle}\0${text}`;
+      const inboundAt = Date.now();
+      const prevInbound = recentInbound.get(inboundKey);
+      recentInbound.set(inboundKey, inboundAt);
+      if (prevInbound != null && inboundAt - prevInbound < INBOUND_DEDUP_MS) {
+        console.log(`[messenger] dedup skip replayed inbound from ${handle}`);
         continue;
       }
       if (content.type !== "reply") {

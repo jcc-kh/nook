@@ -25,7 +25,7 @@ export type ContactAlertKind = "quiet" | "offroute" | "help";
 
 /**
  * Text to the trusted contact, who is only texted when something is wrong and
- * may never have heard of Nook. `who` is the user's name or number.
+ * may never have heard of Nook. `who` is the user's name when Nook has one.
  */
 export function contactAlert(kind: ContactAlertKind, who: string): string {
   const intro = `hey, ${who} has you as their get-home contact on nook.`;
