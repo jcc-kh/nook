@@ -410,7 +410,7 @@ Full SQL provided separately; paste into `src/store/schema.sql`.
 | R8 | No location update for `noUpdateMin` (default 3) while walking, or passive: check-in. Timer-driven; once per silence. No reply: R10 escalation (**floor**) |
 | R9a | 👍 to check-in (or after an alert): resume; no check-in for 10 min |
 | R9b | Free text → Gemini / regex: ok (save place label; confirms off-route) \| help (call + alert contact) \| unclear ("Didn't catch that", timers keep running) |
-| R10 | No reply `nudgeAfterSec` (60): nudge; +`escalateAfterSec` (60): the user's `onNoTextResponse`. `CONTACT_TRUSTED` → alert contact with location; `CALL_USER` / `CALL_THEN_CONTACT` → `StartCall` (log-only until L4); `NONE` → one final nudge, then stop (**floor**) |
+| R10 | No reply `nudgeAfterSec` (60): nudge; +`escalateAfterSec` (60): the user's `onNoTextResponse`. `CONTACT_TRUSTED` → alert contact with location; `CALL_USER` / `CALL_THEN_CONTACT` → `StartCall` (log-only until L4); `CALL_THEN_CONTACT` then alerts the contact `escalateAfterSec` later unless the call is picked up (`CallEvent` started) or the user 👍s / replies ok (the emergency word's `CALL_THEN_CONTACT` is cancelled only by the call); `NONE` → one final nudge, then stop (**floor**). The nudge tells the user their next step and its timing |
 | R11 | ‼️ or "call me": ElevenLabs call immediately (**floor**) |
 | R12 | ❓ → nearest open place (extension / L5 only) |
 | R13 | Emergency word (text) → run `emergencyCode.action` now, no check-in, no acknowledgement; or `silent_alert` call tool → alert contact, call continues (**floor**) |

@@ -1,3 +1,4 @@
+import type { NoResponseAction } from "./settings.ts";
 import type { SendTextTag } from "./types.ts";
 
 /** Canned copy used when Gemini is absent or fails (L1–L2 default). */
@@ -11,13 +12,49 @@ export const templates = {
   checkinOffRoute: "Looks like you're off your usual route. All good? Tap 👍 or tell me where you're headed.",
   checkinNoUpdate: "I haven't had a location update from you in a few minutes. You ok? Tap 👍 or text me.",
   finalNudge: "Haven't heard back. Tap 👍 when you can — I won't reach out to anyone.",
-  // The contact is only texted when something is wrong.
-  alertContactQuiet: "Nook: no reply while walking. Last known location below.",
-  alertContactOffRoute: "Nook: went off their usual route and isn't answering check-ins. Last known location below.",
-  alertContactHelp: "Nook: needs help — check on them.",
 } as const satisfies Record<string, string>;
 
 export type TemplateKey = keyof typeof templates;
+
+export type ContactAlertKind = "quiet" | "offroute" | "help";
+
+/**
+ * Text to the trusted contact, who is only texted when something is wrong and
+ * may never have heard of Nook. `who` is the user's name or number.
+ */
+export function contactAlert(kind: ContactAlertKind, who: string): string {
+  const intro = `Nook here: ${who} added you as their trusted contact for getting home safe.`;
+  switch (kind) {
+    case "quiet":
+      return `${intro} They're out and haven't answered my check-ins. Last known location below.`;
+    case "offroute":
+      return `${intro} They went off their usual route and haven't answered my check-ins. Last known location below.`;
+    case "help":
+      return `${intro} They need help. Please check on them now. Last known location below.`;
+  }
+}
+
+function waitLabel(sec: number): string {
+  if (sec % 60 !== 0) return `${sec} seconds`;
+  const min = sec / 60;
+  return min === 1 ? "a minute" : `${min} minutes`;
+}
+
+/** Appended to the nudge so the user knows what their no-reply setting will do next. */
+export function nextStepLine(action: NoResponseAction, afterSec: number, contactName?: string): string {
+  const them = contactName ?? "your trusted contact";
+  const within = `If I don't hear back in ${waitLabel(afterSec)}`;
+  switch (action) {
+    case "CALL_USER":
+      return `${within}, I'll call you.`;
+    case "CONTACT_TRUSTED":
+      return `${within}, I'll text ${them}.`;
+    case "CALL_THEN_CONTACT":
+      return `${within}, I'll call you, then text ${them}.`;
+    case "NONE":
+      return "";
+  }
+}
 
 export function templateForTag(tag: SendTextTag): string {
   switch (tag) {

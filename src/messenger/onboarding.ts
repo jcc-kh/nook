@@ -59,6 +59,13 @@ type TextInbound = Extract<Inbound, { kind: "text" }>;
 
 const TRACKED_TAGS: SendTextTag[] = ["prompt", "checkin", "nudge", "arrived", "ended"];
 
+/** Time to read a message before the next one in a burst arrives. */
+function readingMs(text: string): number {
+  return Math.min(4_000, Math.max(1_200, 500 + text.length * 25));
+}
+/** Extra time after the Find My card so the user can tap it before the next question. */
+const AFTER_CARD_MS = 3_000;
+
 /** Next unanswered onboarding question; null once onboarding is finished. */
 export function nextQuestion(user: UserRecord): Question | null {
   if (!user.trustedContact) return "contact";
@@ -80,7 +87,18 @@ export interface RouterDeps {
 
 export function createInboundRouter(deps: RouterDeps) {
   const { messenger, locations, users, clock, dispatch } = deps;
-  const reply = (user: UserRecord, text: string) => messenger.sendToUser(user.userId, text);
+  /** Real time (not `clock`) before which the next reply to a user should wait. */
+  const nextSendAt = new Map<string, number>();
+  const reply = async (user: UserRecord, text: string) => {
+    const wait = (nextSendAt.get(user.userId) ?? 0) - Date.now();
+    if (wait > 0) {
+      await messenger.typing(user.userId, true);
+      await Bun.sleep(wait);
+    }
+    const sent = await messenger.sendToUser(user.userId, text);
+    nextSendAt.set(user.userId, Date.now() + readingMs(text));
+    return sent;
+  };
   const log = (user: UserRecord, ...parts: string[]) =>
     console.log(`[onboarding] ${user.userId} (${user.handle})`, ...parts);
   const fresh = async (user: UserRecord) => (await users.getById(user.userId)) ?? user;
@@ -159,7 +177,7 @@ export function createInboundRouter(deps: RouterDeps) {
   async function finish(user: UserRecord) {
     pending.delete(user.userId);
     await save(user, { onboardedAt: clock.now() }, "onboarding complete");
-    await reply(user, copy.done);
+    await reply(user, copy.done(await fresh(user)));
   }
 
   async function welcome(msg: Inbound) {
@@ -176,6 +194,7 @@ export function createInboundRouter(deps: RouterDeps) {
       awaitingShare.add(user.userId);
       await reply(user, copy.locationRequest);
       await locations.request(msg.chatId, user.handle);
+      nextSendAt.set(user.userId, Date.now() + AFTER_CARD_MS);
     }
     await continueOnboarding(user);
   }
@@ -360,6 +379,7 @@ export function createInboundRouter(deps: RouterDeps) {
   }
 
   async function route(msg: Inbound): Promise<void> {
+    nextSendAt.delete(msg.user.userId);
     if (msg.kind === "reaction") {
       if (msg.isNewUser) await welcome(msg);
       const uid = msg.user.userId;

@@ -43,7 +43,7 @@ async function dispatch(event: Event): Promise<void> {
   try {
     const actions = await brain.handle(event);
     for (const action of actions) {
-      await messenger.execute(action);
+      await messenger.execute(action).catch((err) => console.error(`[nook] ${action.type} failed`, err));
     }
   } catch (err) {
     console.error(`[nook] failed handling ${event.type} for ${event.userId}`, err);
@@ -133,7 +133,7 @@ const ticker = setInterval(async () => {
   ticking = true;
   try {
     for (const action of await brain.tick(clock.now())) {
-      await messenger.execute(action);
+      await messenger.execute(action).catch((err) => console.error(`[nook] ${action.type} failed`, err));
     }
   } catch (err) {
     console.error("[nook] tick failed", err);

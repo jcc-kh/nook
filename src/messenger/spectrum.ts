@@ -1,10 +1,11 @@
-import { Spectrum, type Space } from "spectrum-ts";
+import { reply, Spectrum, type Content, type Message, type Space } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
 import { terminal } from "spectrum-ts/providers/terminal";
 import { templateForTag } from "../shared/templates.ts";
 import type { Action, ExecuteResult, SendTextTag } from "../shared/types.ts";
 import type { UserRecord, UserStore } from "../store/index.ts";
 import type { Messenger } from "./index.ts";
+import { copy } from "./copy.ts";
 
 export type Provider = "terminal" | "imessage";
 
@@ -16,7 +17,8 @@ interface InboundBase {
 }
 
 export type Inbound =
-  | (InboundBase & { kind: "text"; messageId: string; text: string })
+  /** `threadTargetId`: set when the user replied inside a thread (to that message). */
+  | (InboundBase & { kind: "text"; messageId: string; text: string; threadTargetId?: string })
   | (InboundBase & { kind: "reaction"; emoji: string; targetMessageId: string });
 
 export interface SpectrumMessenger extends Messenger {
@@ -25,6 +27,8 @@ export interface SpectrumMessenger extends Messenger {
   inbound(): AsyncIterable<Inbound>;
   /** Untagged reply (onboarding copy). */
   sendToUser(userId: string, text: string): Promise<ExecuteResult>;
+  /** Best-effort typing indicator in the user's chat. */
+  typing(userId: string, on: boolean): Promise<void>;
   lastMessageId(userId: string, tag: SendTextTag): string | undefined;
   stop(): Promise<void>;
 }
@@ -38,6 +42,22 @@ export interface SpectrumMessengerOptions {
 
 function mapsLink(lat: number, lon: number): string {
   return `https://maps.apple.com/?ll=${lat.toFixed(5)},${lon.toFixed(5)}`;
+}
+
+/** Plain text of a message, looking inside in-thread replies and text+attachment groups. */
+function textOf(content: Content): string | undefined {
+  switch (content.type) {
+    case "text":
+      return content.text;
+    case "reply":
+      return textOf(content.content as Content);
+    case "group": {
+      const parts = content.items.map((m) => textOf(m.content)).filter((t): t is string => !!t);
+      return parts.length ? parts.join("\n") : undefined;
+    }
+    default:
+      return undefined;
+  }
 }
 
 export async function createSpectrumMessenger(
@@ -60,6 +80,8 @@ export async function createSpectrumMessenger(
 
   const spaces = new Map<string, Space>();
   const lastIdByTag = new Map<string, Map<SendTextTag, string>>();
+  /** The user's in-thread message currently being handled; our replies go into that thread. */
+  const threads = new Map<string, Message>();
 
   async function openDm(handle: string): Promise<Space | undefined> {
     if (!imApp) return undefined;
@@ -83,8 +105,27 @@ export async function createSpectrumMessenger(
       console.warn(`[messenger] no space for ${userId}; dropping: ${text}`);
       return {};
     }
+    const thread = threads.get(userId);
+    if (thread) {
+      try {
+        const sent = await space.send(reply(text, thread));
+        if (sent) return { messageId: sent.id };
+      } catch (err) {
+        console.warn(`[messenger] threaded reply to ${userId} failed; sending in the main chat`, err);
+      }
+    }
     const sent = await space.send(text);
     return sent ? { messageId: sent.id } : {};
+  }
+
+  async function typing(userId: string, on: boolean): Promise<void> {
+    const space = await spaceForUser(userId);
+    if (!space) return;
+    try {
+      await (on ? space.startTyping() : space.stopTyping());
+    } catch {
+      /* indicator is cosmetic */
+    }
   }
 
   async function alertContact(userId: string, text: string, lat: number, lon: number) {
@@ -95,13 +136,22 @@ export async function createSpectrumMessenger(
       console.warn(`[messenger] AlertContact for ${userId} but no trusted contact on file:\n${body}`);
       return;
     }
-    const space = await openDm(contact.phone);
-    if (!space) {
-      // Terminal has no second person to text; surface it in the log instead.
-      console.log(`[messenger] → trusted contact ${contact.name ?? ""} ${contact.phone}:\n${body}`);
-      return;
+    try {
+      const space = await openDm(contact.phone);
+      if (!space) {
+        // Terminal has no second person to text; surface it in the log instead.
+        console.log(`[messenger] → trusted contact ${contact.name ?? ""} ${contact.phone}:\n${body}`);
+        return;
+      }
+      await space.send(body);
+      console.log(`[messenger] alerted trusted contact ${contact.name ?? ""} ${contact.phone}`);
+    } catch (err) {
+      // e.g. Photon "Target not allowed for this project": the user must not assume someone was told.
+      console.error(
+        `[messenger] could NOT alert trusted contact ${contact.phone}: ${err instanceof Error ? err.message : err}`,
+      );
+      await sendToUser(userId, copy.contactUnreachable(contact.name)).catch(() => {});
     }
-    await space.send(body);
   }
 
   async function execute(action: Action): Promise<ExecuteResult> {
@@ -136,10 +186,26 @@ export async function createSpectrumMessenger(
 
       const base: InboundBase = { user, isNewUser: !existing, chatId: space.id };
       const content = message.content;
-      if (content.type === "text") {
-        yield { ...base, kind: "text", messageId: message.id, text: content.text };
-      } else if (content.type === "reaction") {
+      if (content.type === "reaction") {
         yield { ...base, kind: "reaction", emoji: content.emoji, targetMessageId: content.target.id };
+        continue;
+      }
+      const text = textOf(content);
+      if (text === undefined) {
+        console.log(`[messenger] ignoring ${content.type} message from ${user.userId}`);
+        continue;
+      }
+      if (content.type !== "reply") {
+        yield { ...base, kind: "text", messageId: message.id, text };
+        continue;
+      }
+      // The consumer handles each message before pulling the next, so the
+      // thread stays set exactly while this message's replies are sent.
+      threads.set(user.userId, message);
+      try {
+        yield { ...base, kind: "text", messageId: message.id, text, threadTargetId: content.target.id };
+      } finally {
+        threads.delete(user.userId);
       }
     }
   }
@@ -149,6 +215,7 @@ export async function createSpectrumMessenger(
     execute,
     inbound,
     sendToUser,
+    typing,
     lastMessageId: (userId, tag) => lastIdByTag.get(userId)?.get(tag),
     stop: () => app.stop(),
   };

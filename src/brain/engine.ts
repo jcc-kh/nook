@@ -13,7 +13,13 @@ import type {
 } from "../shared/types.ts";
 import { toCell } from "../shared/cell.ts";
 import { distanceM, pathLengthM, speedMps } from "../shared/geo.ts";
-import { templates, templateForTag } from "../shared/templates.ts";
+import {
+  contactAlert,
+  nextStepLine,
+  templates,
+  templateForTag,
+  type ContactAlertKind,
+} from "../shared/templates.ts";
 import {
   escalationSteps,
   resolveTimeouts,
@@ -110,6 +116,12 @@ interface UserRuntime {
   knownStopCell: string | null;
   friendSince: Date | null;
   lastShortAddress?: string;
+  /**
+   * CALL_THEN_CONTACT: alert the contact at `at` unless the call is picked up.
+   * R10 (missed check-in) is also cancelled by a 👍 / ok reply; R13 (emergency
+   * word) only by the call, so a coerced reply can't call it off.
+   */
+  contactAfterCall: { at: Date; rule: "R10" | "R13"; kind: ContactAlertKind } | null;
   pendingActions: Action[];
 }
 
@@ -144,6 +156,7 @@ function emptyRuntime(): UserRuntime {
     knownStopSince: null,
     knownStopCell: null,
     friendSince: null,
+    contactAfterCall: null,
     pendingActions: [],
   };
 }
@@ -211,6 +224,11 @@ function isWatching(user: UserRecord, now: Date, lastPing: LocationPing | null):
 function noResponseAction(user: UserRecord): NoResponseAction {
   if (user.escalation) return user.escalation.onNoTextResponse;
   return user.trustedContact || user.contact ? "CONTACT_TRUSTED" : "NONE";
+}
+
+/** How the trusted contact knows who the alert is about. */
+function userLabel(user: UserRecord): string {
+  return user.displayName ?? user.handle;
 }
 
 function cellCenter(cell: string): { lat: number; lon: number } | null {
@@ -333,6 +351,14 @@ function canCheckin(rt: UserRuntime, now: Date): boolean {
   return true;
 }
 
+/**
+ * CALLING because a check-in went unanswered (not ‼️ / "call me" / the
+ * emergency word): a 👍 or "ok" reply still counts as the user responding.
+ */
+function awaitingCallReply(rt: UserRuntime): boolean {
+  return rt.phase === "CALLING" && rt.escalated && rt.contactAfterCall?.rule !== "R13";
+}
+
 function openCheckin(
   rt: UserRuntime,
   userId: string,
@@ -360,6 +386,7 @@ function resumeWalking(rt: UserRuntime, now: Date) {
   rt.checkinKind = null;
   rt.nudged = false;
   rt.escalated = false;
+  rt.contactAfterCall = null;
   rt.suppressCheckinUntil = new Date(now.getTime() + CHECKIN_SNOOZE_MS);
 }
 
@@ -500,6 +527,7 @@ async function endWalk(
   rt.offRouteCells = [];
   rt.offRouteConfirmed = false;
   rt.awayPings = 0;
+  rt.contactAfterCall = null;
 }
 
 interface UsualCells {
@@ -643,26 +671,25 @@ export function createBrainEngine(deps: BrainDeps) {
   /** Final step after check-in + nudge go unanswered, per the user's choice. */
   async function escalate(rt: UserRuntime, user: UserRecord, now: Date) {
     const action = noResponseAction(user);
+    const steps = escalationSteps(action);
     const last = rt.lastPing;
     const lat = last?.lat ?? user.homeLat ?? 0;
     const lon = last?.lon ?? user.homeLon ?? 0;
+    const kind: ContactAlertKind = rt.checkinKind === "offroute" ? "offroute" : "quiet";
     rt.escalated = true;
     if (action === "NONE") {
       // Floor: never go fully silent, but don't involve anyone.
       send(rt, user.userId, "nudge", templates.finalNudge);
-    } else if (escalationSteps(action)[0] === "CONTACT_TRUSTED") {
-      alert(
-        rt,
-        user.userId,
-        rt.checkinKind === "offroute" ? templates.alertContactOffRoute : templates.alertContactQuiet,
-        lat,
-        lon,
-      );
+    } else if (steps[0] === "CONTACT_TRUSTED") {
+      alert(rt, user.userId, contactAlert(kind, userLabel(user)), lat, lon);
       rt.phase = "ALERTED";
     } else {
       rt.phase = "CALLING";
       startCall(rt, user.userId, rt.walkId!, callVars(rt, user, now));
-      // TODO(L4): for CALL_THEN_CONTACT, alert the contact when the call goes unanswered.
+      if (steps.includes("CONTACT_TRUSTED")) {
+        const waitMs = resolveTimeouts(user.timeouts).escalateAfterSec * 1000;
+        rt.contactAfterCall = { at: new Date(now.getTime() + waitMs), rule: "R10", kind };
+      }
     }
     await persistPhase(deps, rt);
     await logRule(deps, user.userId, "R10", rt.walkId, {
@@ -694,12 +721,30 @@ export function createBrainEngine(deps: BrainDeps) {
       const nudgeAt = timeouts.nudgeAfterSec * 1000;
       const escalateAt = nudgeAt + timeouts.escalateAfterSec * 1000;
       if (!rt.nudged && since >= nudgeAt) {
-        send(rt, user.userId, "nudge");
+        const next = nextStepLine(noResponseAction(user), timeouts.escalateAfterSec, user.trustedContact?.name);
+        send(rt, user.userId, "nudge", [copyFor(rt, "nudge"), next].filter(Boolean).join(" "));
         rt.nudged = true;
         await logRule(deps, user.userId, "R10", rt.walkId, { step: "nudge", kind: rt.checkinKind });
       } else if (rt.nudged && since >= escalateAt) {
         await escalate(rt, user, now);
       }
+    }
+
+    // CALL_THEN_CONTACT: the call wasn't picked up, so reach the contact.
+    const pendingContact = rt.contactAfterCall;
+    if (pendingContact && now >= pendingContact.at) {
+      rt.contactAfterCall = null;
+      const lastFix = rt.lastPing;
+      alert(
+        rt,
+        user.userId,
+        contactAlert(pendingContact.kind, userLabel(user)),
+        lastFix?.lat ?? user.homeLat ?? 0,
+        lastFix?.lon ?? user.homeLon ?? 0,
+      );
+      if (rt.phase === "CALLING") rt.phase = "ALERTED";
+      await persistPhase(deps, rt);
+      await logRule(deps, user.userId, pendingContact.rule, rt.walkId, { step: "contact_after_call" });
     }
 
     // R8: no location update for noUpdateMin (walks, or away from home while watching)
@@ -1010,7 +1055,12 @@ export function createBrainEngine(deps: BrainDeps) {
       }
 
       // R9b: free text during a check-in or walk
-      if (rt.phase === "CHECKING_IN" || rt.phase === "WALKING" || rt.phase === "ALERTED") {
+      if (
+        rt.phase === "CHECKING_IN" ||
+        rt.phase === "WALKING" ||
+        rt.phase === "ALERTED" ||
+        awaitingCallReply(rt)
+      ) {
         const parse = deps.parseReply ?? (async () => ({ status: "unclear" as const }));
         let parsed: ParsedReply;
         try {
@@ -1061,11 +1111,12 @@ export function createBrainEngine(deps: BrainDeps) {
             await beginWalk(deps, rt, user, now, "help", last?.lat ?? 0, last?.lon ?? 0);
           }
           rt.phase = "CALLING";
+          rt.contactAfterCall = null;
           startCall(rt, user.userId, rt.walkId!, callVars(rt, user, now));
           alert(
             rt,
             user.userId,
-            templates.alertContactHelp,
+            contactAlert("help", userLabel(user)),
             last?.lat ?? 0,
             last?.lon ?? 0,
           );
@@ -1100,7 +1151,10 @@ export function createBrainEngine(deps: BrainDeps) {
         return rt.pendingActions;
       }
       // R9a
-      if ((rt.phase === "CHECKING_IN" || rt.phase === "ALERTED") && event.emoji === "👍") {
+      if (
+        (rt.phase === "CHECKING_IN" || rt.phase === "ALERTED" || awaitingCallReply(rt)) &&
+        event.emoji === "👍"
+      ) {
         if (rt.checkinKind === "offroute") await confirmOffRoute(rt, user, now);
         resumeWalking(rt, now);
         await persistPhase(deps, rt);
@@ -1122,12 +1176,18 @@ export function createBrainEngine(deps: BrainDeps) {
       const lon = last?.lon ?? user.homeLon ?? 0;
       const steps = escalationSteps(code.action);
       if (steps[0] === "CONTACT_TRUSTED") {
-        alert(rt, user.userId, templates.alertContactHelp, lat, lon);
+        alert(rt, user.userId, contactAlert("help", userLabel(user)), lat, lon);
       } else {
         if (!rt.walkId) await beginWalk(deps, rt, user, now, "emergency", lat, lon);
         rt.phase = "CALLING";
         startCall(rt, user.userId, rt.walkId!, callVars(rt, user, now));
-        // TODO(L4): for CALL_THEN_CONTACT, alert the contact when the call goes unanswered.
+        rt.contactAfterCall = steps.includes("CONTACT_TRUSTED")
+          ? {
+              at: new Date(now.getTime() + resolveTimeouts(user.timeouts).escalateAfterSec * 1000),
+              rule: "R13",
+              kind: "help",
+            }
+          : null;
       }
       await logRule(deps, user.userId, "R13", rt.walkId, {
         via: "emergency_word",
@@ -1142,11 +1202,12 @@ export function createBrainEngine(deps: BrainDeps) {
         alert(
           rt,
           user.userId,
-          templates.alertContactHelp,
+          contactAlert("help", userLabel(user)),
           last?.lat ?? user.homeLat ?? 0,
           last?.lon ?? user.homeLon ?? 0,
         );
         rt.phase = "CALLING";
+        rt.contactAfterCall = null;
         await logRule(deps, user.userId, "R13", event.walkId);
         return rt.pendingActions;
       }
@@ -1157,6 +1218,8 @@ export function createBrainEngine(deps: BrainDeps) {
       if (event.callType === "started") {
         rt.phase = "CALLING";
         rt.walkId = event.walkId;
+        // The user picked up, so the "then contact" step is off.
+        rt.contactAfterCall = null;
         return rt.pendingActions;
       }
     }

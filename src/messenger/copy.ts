@@ -88,6 +88,27 @@ function contactLabel(c: TrustedContact): string {
   return c.name ?? `the number ending in ${c.phone.slice(-4)}`;
 }
 
+/** "22:00" → "10pm", "06:30" → "6:30am". */
+function clockLabel(hhmm: string): string {
+  const [h = 0, m = 0] = hhmm.split(":").map(Number);
+  const suffix = h < 12 ? "am" : "pm";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return m ? `${h12}:${String(m).padStart(2, "0")}${suffix}` : `${h12}${suffix}`;
+}
+
+/** Nook's voice: when it will watch without being asked. */
+function monitoringPlan(user: UserRecord): string {
+  switch (user.monitoringMode) {
+    case "MANUAL":
+      return "I'll only watch when you ask. Text 'walk me home' when you head out.";
+    case "AWAY_FROM_HOME":
+      return "I'll keep an eye on things whenever you're away from home. You can also text 'walk me home' anytime.";
+    case "EVENINGS":
+    default:
+      return `I'll keep an eye on your trips in the evenings (${clockLabel(user.nightStart ?? "22:00")}–${clockLabel(user.nightEnd ?? "06:00")}). You can also text 'walk me home' anytime.`;
+  }
+}
+
 function timingSummary(t: Required<CheckinTimeouts>): string {
   return `nudge after ${t.nudgeAfterSec}s, next step ${t.escalateAfterSec}s after that, check in if your location stops for ${t.noUpdateMin} min`;
 }
@@ -119,13 +140,33 @@ export const copy = {
   codeSet: (phrase: string, action: EmergencyAction, c?: TrustedContact) =>
     `'${phrase}' is set. If you send or say it, ${emergencyConsequence(action, c)}.`,
 
-  done: "You're all set 🌙\nI'll keep an eye on your trips based on the settings you chose and check in if something looks unusual.\n\nYou can text 'settings' anytime to change when I monitor, who I contact, how I escalate, your check-in timing, or your emergency word.",
+  /** Recap of what the user chose, in terms of what Nook will actually do. */
+  done(user: UserRecord): string {
+    const lines = ["You're all set 🌙", monitoringPlan(user)];
+    if (user.escalation) {
+      lines.push(
+        `If something looks unusual I'll text you first. If you don't answer, ${escalationPlan(user.escalation.onNoTextResponse, user.trustedContact)}.`,
+      );
+    }
+    if (user.homeLat === undefined) {
+      lines.push(
+        "One more thing: text 'home' next time you're there, so I know where home is and can tell when you've made it back.",
+      );
+    }
+    lines.push(
+      "Text 'settings' anytime to change when I monitor, who I contact, how I escalate, your check-in timing, or your emergency word.",
+    );
+    return lines.join("\n\n");
+  },
 
   pickNumber: (n: number) => `Reply with a number from 1 to ${n}.`,
   yesOrNo: "Reply yes or no.",
 
   learnedNothing:
     "I haven't learned enough about your routine yet. As you use Nook, I'll gradually pick up patterns like places you visit often and routes you commonly take.",
+
+  contactUnreachable: (name?: string) =>
+    `I tried to reach ${name ?? "your trusted contact"} but my message didn't go through. If you need help, contact someone directly. Tap 👍 if you're okay.`,
 
   homeSaved: "Home saved.",
   homeNoFix:
