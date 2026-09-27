@@ -8,8 +8,11 @@ import { createSpectrumMessenger, type Provider } from "./messenger/spectrum.ts"
 import { toE164 } from "./messenger/parse.ts";
 import { createUserStore } from "./store/index.ts";
 import { callMode, voiceConfigFromEnv } from "./voice/index.ts";
+import { createVoiceNoteIngest } from "./voice/notes.ts";
+import { phraseForVoice } from "./llm/phrase.ts";
 import { nextGuidance } from "./voice/guidance.ts";
 import { createTalkLinks } from "./voice/talk.ts";
+import { transcriberFromEnv } from "./voice/transcribe.ts";
 import { createVonageCalls, type BridgeSocket } from "./voice/vonage.ts";
 import { createLiveSim, SCENARIOS, type ScenarioName } from "./sim/live.ts";
 import { CALL_OUTCOMES, type Action, type Brain, type CallOutcome, type Event, type LocationPing } from "./shared/types.ts";
@@ -85,10 +88,14 @@ async function runActions(actions: Action[]): Promise<void> {
         console.log(`[nook] → StartCall ${action.userId} walk=${action.walkId}`);
       }
       await messenger.execute(action);
+      // Twilio calls give us no answer signal and the agent no longer reports "started".
+      if (action.type === "StartCall" && callMode(voice) === "phone") {
+        await reportCall(action.userId, action.walkId, "started");
+      }
     } catch (err) {
       console.error(`[nook] ${action.type} failed`, err);
+      // The brain answers ended_unresolved with a text check-in (never a contact alert).
       if (action.type === "StartCall") {
-        await messenger.sendToUser(action.userId, copy.callFailed).catch(() => {});
         await dispatch({
           type: "CallEvent",
           userId: action.userId,
@@ -176,6 +183,39 @@ async function handleDevSim(req: Request, url: URL): Promise<Response> {
   return Response.json({ ok: true, userId: user.userId, ...started });
 }
 
+/** POST /dev/call {handle}: place a check-in call (or link) outside any walk, to test the voice path. */
+async function handleDevCall(req: Request): Promise<Response> {
+  if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+  const body = (await req.json().catch(() => ({}))) as { handle?: string };
+  const handle = body.handle ? toE164(body.handle) ?? body.handle : undefined;
+  const user = handle ? await users.getByHandle(handle) : null;
+  if (!user) return Response.json({ ok: false, error: `no user for ${body.handle ?? "(missing handle)"}` }, { status: 404 });
+  const walkId = `test-call-${Date.now()}`;
+  await runActions([
+    {
+      type: "StartCall",
+      userId: user.userId,
+      walkId,
+      vars: {
+        displayName: user.displayName ?? "friend",
+        street: "your street",
+        minutesWalking: 0,
+        walkId,
+        callReason: "manual_call",
+        safetyState: "safe",
+      },
+    },
+  ]);
+  return Response.json({ ok: true, userId: user.userId, walkId, mode: callMode(voice) });
+}
+
+/** Attach a spoken line. Gemini phrases the map facts; the fallback line is used if it drifts. */
+async function withSay(data: unknown): Promise<unknown> {
+  if (!data || typeof data !== "object") return data;
+  const say = await phraseForVoice(data);
+  return say ? { ...(data as Record<string, unknown>), say } : data;
+}
+
 /**
  * ElevenLabs agent webhook tools. Parameters may arrive flat or under
  * `parameters`; `user_id` / `walk_id` come from the call's dynamic variables.
@@ -197,7 +237,30 @@ async function handleTool(req: Request, url: URL): Promise<Response> {
 
   if (url.pathname === "/tools/location") {
     const ctx = await brain.getLiveContext(walkId);
-    return ctx ? Response.json(ctx) : Response.json({ ok: false, error: "no live location" }, { status: 404 });
+    if (!ctx) return Response.json({ ok: false, error: "no live location" }, { status: 404 });
+    return Response.json({
+      ...ctx,
+      note: ctx.contextFresh
+        ? undefined
+        : `Location is ${Math.round(ctx.ageSec)} seconds old. Don't describe it as where they are right now.`,
+    });
+  }
+
+  if (url.pathname === "/tools/safe-destinations") {
+    const result = await brain.safeDestinations?.(walkId);
+    return Response.json(await withSay(result ?? { ok: false, error: "navigation not available" }));
+  }
+
+  if (url.pathname === "/tools/set-destination") {
+    const choice = typeof params.choice === "string" ? params.choice.trim() : "";
+    if (!choice) return Response.json({ ok: false, error: "choice required (home, trip, or a place_id)" }, { status: 400 });
+    const result = await brain.setDestination?.(walkId, choice);
+    return Response.json(await withSay(result ?? { ok: false, error: "navigation not available" }));
+  }
+
+  if (url.pathname === "/tools/navigation") {
+    const result = await brain.navigation?.(walkId);
+    return Response.json(await withSay(result ?? { ok: false, error: "navigation not available" }));
   }
 
   if (url.pathname === "/tools/safe-place" || url.pathname === "/tools/guidance") {
@@ -225,11 +288,22 @@ async function handleTool(req: Request, url: URL): Promise<Response> {
     if (!userId || !(await users.getById(userId))) {
       return Response.json({ ok: false, error: "unknown user_id" }, { status: 404 });
     }
-    console.log(`[voice] ${userId} walk ${walkId}: ${outcome}`);
+    const situation =
+      typeof params.situation === "string" && params.situation.trim()
+        ? params.situation.trim().slice(0, 300)
+        : undefined;
+    console.log(`[voice] ${userId} walk ${walkId}: ${outcome}${situation ? ` (${situation})` : ""}`);
     talkLinks?.noteOutcome(walkId, outcome);
     vonageCalls?.noteOutcome(walkId, outcome);
     const before = Date.now();
-    await dispatch({ type: "CallEvent", userId, walkId, callType: outcome, time: clock.now() });
+    await dispatch({
+      type: "CallEvent",
+      userId,
+      walkId,
+      callType: outcome,
+      time: clock.now(),
+      ...(situation && { situation }),
+    });
     const alert = messenger.lastContactAlert(userId);
     if (outcome !== "request_escalation") return Response.json({ ok: true });
     if (alert && alert.at >= before) {
@@ -238,8 +312,8 @@ async function handleTool(req: Request, url: URL): Promise<Response> {
         contact_alerted: alert.ok,
         contact_name: alert.name ?? "their trusted contact",
         note: alert.ok
-          ? "The trusted contact was just texted the caller's location."
-          : "The text to the trusted contact FAILED. Tell the caller honestly and have them call their contact or 911 themselves.",
+          ? "The trusted contact was just texted the caller's location and what they said. Keep telling them to call 911."
+          : "The text to the trusted contact FAILED. Tell the caller honestly and have them call 911 or their contact themselves.",
       });
     }
     return Response.json({
@@ -263,7 +337,9 @@ const locations = await createLocations({
     : {}),
 });
 
-router = createInboundRouter({ messenger, locations, users, clock, dispatch });
+const transcriber = transcriberFromEnv();
+const ingestVoiceNote = createVoiceNoteIngest({ transcribe: transcriber, persist: brainMode === "live" });
+router = createInboundRouter({ messenger, locations, users, clock, dispatch, ingestVoiceNote });
 const { route } = router;
 
 const TICK_MS = 30_000;
@@ -281,7 +357,7 @@ const ticker = setInterval(async () => {
 }, TICK_MS);
 
 console.log(
-  `[nook] ready  PROVIDER=${provider}  BRAIN_MODE=${brainMode}  PORT=${port}  DB=${process.env.DATABASE_URL ? "yes" : "no"}  GEMINI=${process.env.USE_GEMINI === "0" || !process.env.GEMINI_API_KEY ? "off" : "on"}  CALLS=${callMode(voice)}  DEV_SIM=${devSim ? "on" : "off"}`,
+  `[nook] ready  PROVIDER=${provider}  BRAIN_MODE=${brainMode}  PORT=${port}  DB=${process.env.DATABASE_URL ? "yes" : "no"}  GEMINI=${process.env.USE_GEMINI === "0" || !process.env.GEMINI_API_KEY ? "off" : "on"}  CALLS=${callMode(voice)}  STT=${process.env.ELEVENLABS_API_KEY ? "on" : "off"}  DEV_SIM=${devSim ? "on" : "off"}`,
 );
 
 const server = Bun.serve<BridgeSocket["data"], never>({
@@ -294,11 +370,12 @@ const server = Bun.serve<BridgeSocket["data"], never>({
       return srv.upgrade(req, { data }) ? undefined : new Response("upgrade failed", { status: 400 });
     }
     if (vonageCalls && url.pathname.startsWith("/vonage/event/")) return vonageCalls.handleEvent(req, url);
-    if (devSim && url.pathname.startsWith("/dev/sim")) {
+    if (devSim && url.pathname.startsWith("/dev/")) {
       if (!isLoopback(srv.requestIP(req)?.address)) {
         return new Response("forbidden", { status: 403 });
       }
-      return handleDevSim(req, url);
+      if (url.pathname === "/dev/call") return handleDevCall(req);
+      if (url.pathname.startsWith("/dev/sim")) return handleDevSim(req, url);
     }
     if (url.pathname.startsWith("/tools/")) return handleTool(req, url);
     if (talkLinks && url.pathname.startsWith("/talk/")) return talkLinks.handle(req, url);

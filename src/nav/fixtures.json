@@ -1,0 +1,430 @@
+{
+ "$comment": "Demo navigation data around Columbia / Morningside Heights. Hand-authored; open status is fixed, not live.",
+ "home": {
+  "name": "home",
+  "lat": 40.807501,
+  "lon": -73.962595
+ },
+ "places": [
+  {
+   "id": "toms",
+   "name": "Tom's Restaurant",
+   "category": "restaurant",
+   "address": "2880 Broadway (at W 112th St)",
+   "lat": 40.805206,
+   "lon": -73.965782,
+   "openNow": true,
+   "hours": "open late"
+  },
+  {
+   "id": "westside",
+   "name": "Westside Market",
+   "category": "grocery",
+   "address": "2840 Broadway (at W 110th St)",
+   "lat": 40.803981,
+   "lon": -73.966679,
+   "openNow": true,
+   "hours": "7am-1am"
+  },
+  {
+   "id": "cvs",
+   "name": "CVS Pharmacy",
+   "category": "pharmacy",
+   "address": "Broadway & W 113th St",
+   "lat": 40.805992,
+   "lon": -73.965207,
+   "openNow": true,
+   "hours": "24 hours"
+  },
+  {
+   "id": "psafe",
+   "name": "Columbia Public Safety (Low Library)",
+   "category": "security",
+   "address": "535 W 116th St",
+   "lat": 40.807634,
+   "lon": -73.962267,
+   "openNow": true,
+   "hours": "24 hours"
+  },
+  {
+   "id": "pastry",
+   "name": "Hungarian Pastry Shop",
+   "category": "cafe",
+   "address": "1030 Amsterdam Ave (at W 111th St)",
+   "lat": 40.803494,
+   "lon": -73.963562,
+   "openNow": false,
+   "hours": "8am-11:30pm"
+  }
+ ],
+ "routes": [
+  {
+   "id": "amsterdam-home",
+   "to": "home",
+   "steps": [
+    {
+     "instruction": "Head north on Amsterdam Ave toward W 116th St",
+     "street": "Amsterdam Ave",
+     "landmark": "the Cathedral of St. John the Divine on your right",
+     "path": [
+      {
+       "lat": 40.802751,
+       "lon": -73.963944
+      },
+      {
+       "lat": 40.806522,
+       "lon": -73.961182
+      }
+     ]
+    },
+    {
+     "instruction": "Turn left through the gates onto College Walk (W 116th St)",
+     "street": "College Walk",
+     "landmark": "the Columbia gates at Amsterdam Ave",
+     "path": [
+      {
+       "lat": 40.806522,
+       "lon": -73.961182
+      },
+      {
+       "lat": 40.807206,
+       "lon": -73.962812
+      }
+     ]
+    },
+    {
+     "instruction": "Home is just ahead on your right",
+     "street": "College Walk",
+     "path": [
+      {
+       "lat": 40.807206,
+       "lon": -73.962812
+      },
+      {
+       "lat": 40.807501,
+       "lon": -73.962595
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "broadway-home",
+   "to": "home",
+   "steps": [
+    {
+     "instruction": "Head north on Broadway toward W 116th St",
+     "street": "Broadway",
+     "landmark": "the 116 St subway entrance",
+     "path": [
+      {
+       "lat": 40.80397,
+       "lon": -73.96685
+      },
+      {
+       "lat": 40.807741,
+       "lon": -73.964088
+      }
+     ]
+    },
+    {
+     "instruction": "Turn right through the gates onto College Walk (W 116th St)",
+     "street": "College Walk",
+     "landmark": "the Columbia gates at Broadway",
+     "path": [
+      {
+       "lat": 40.807741,
+       "lon": -73.964088
+      },
+      {
+       "lat": 40.807206,
+       "lon": -73.962812
+      }
+     ]
+    },
+    {
+     "instruction": "Home is just ahead on your left",
+     "street": "College Walk",
+     "path": [
+      {
+       "lat": 40.807206,
+       "lon": -73.962812
+      },
+      {
+       "lat": 40.807501,
+       "lon": -73.962595
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "amsterdam-toms",
+   "to": "toms",
+   "steps": [
+    {
+     "instruction": "Head along Amsterdam Ave to W 112th St",
+     "street": "Amsterdam Ave",
+     "landmark": "the Cathedral of St. John the Divine",
+     "path": [
+      {
+       "lat": 40.802751,
+       "lon": -73.963944
+      },
+      {
+       "lat": 40.804008,
+       "lon": -73.963023
+      }
+     ]
+    },
+    {
+     "instruction": "Turn onto W 112th St, heading west toward Broadway",
+     "street": "W 112th St",
+     "path": [
+      {
+       "lat": 40.804008,
+       "lon": -73.963023
+      },
+      {
+       "lat": 40.805175,
+       "lon": -73.965805
+      }
+     ]
+    },
+    {
+     "instruction": "Tom's Restaurant is on the corner of Broadway, on your right",
+     "street": "Broadway",
+     "path": [
+      {
+       "lat": 40.805175,
+       "lon": -73.965805
+      },
+      {
+       "lat": 40.805206,
+       "lon": -73.965782
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "broadway-toms",
+   "to": "toms",
+   "steps": [
+    {
+     "instruction": "Head north on Broadway to W 112th St",
+     "street": "Broadway",
+     "landmark": "Westside Market on the corner of 110th",
+     "path": [
+      {
+       "lat": 40.80397,
+       "lon": -73.96685
+      },
+      {
+       "lat": 40.805227,
+       "lon": -73.965929
+      }
+     ]
+    },
+    {
+     "instruction": "Tom's Restaurant is right there on the corner, on your right",
+     "street": "Broadway",
+     "path": [
+      {
+       "lat": 40.805227,
+       "lon": -73.965929
+      },
+      {
+       "lat": 40.805206,
+       "lon": -73.965782
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "amsterdam-westside",
+   "to": "westside",
+   "steps": [
+    {
+     "instruction": "Head south on Amsterdam Ave to W 110th St (Cathedral Pkwy)",
+     "street": "Amsterdam Ave",
+     "landmark": "the Cathedral of St. John the Divine on your left",
+     "path": [
+      {
+       "lat": 40.804636,
+       "lon": -73.962563
+      },
+      {
+       "lat": 40.802751,
+       "lon": -73.963944
+      }
+     ]
+    },
+    {
+     "instruction": "Turn right onto W 110th St toward Broadway",
+     "street": "W 110th St",
+     "path": [
+      {
+       "lat": 40.802751,
+       "lon": -73.963944
+      },
+      {
+       "lat": 40.803918,
+       "lon": -73.966725
+      }
+     ]
+    },
+    {
+     "instruction": "Westside Market is on the corner of Broadway",
+     "street": "Broadway",
+     "path": [
+      {
+       "lat": 40.803918,
+       "lon": -73.966725
+      },
+      {
+       "lat": 40.803981,
+       "lon": -73.966679
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "broadway-westside",
+   "to": "westside",
+   "steps": [
+    {
+     "instruction": "Head south on Broadway to W 110th St",
+     "street": "Broadway",
+     "landmark": "Tom's Restaurant at 112th",
+     "path": [
+      {
+       "lat": 40.807741,
+       "lon": -73.964088
+      },
+      {
+       "lat": 40.804033,
+       "lon": -73.966804
+      }
+     ]
+    },
+    {
+     "instruction": "Westside Market is on your left at the corner",
+     "street": "Broadway",
+     "path": [
+      {
+       "lat": 40.804033,
+       "lon": -73.966804
+      },
+      {
+       "lat": 40.803981,
+       "lon": -73.966679
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "amsterdam-cvs",
+   "to": "cvs",
+   "steps": [
+    {
+     "instruction": "Head north on Amsterdam Ave to W 113th St",
+     "street": "Amsterdam Ave",
+     "landmark": "the Cathedral of St. John the Divine on your right",
+     "path": [
+      {
+       "lat": 40.802751,
+       "lon": -73.963944
+      },
+      {
+       "lat": 40.804636,
+       "lon": -73.962563
+      }
+     ]
+    },
+    {
+     "instruction": "Turn left onto W 113th St toward Broadway",
+     "street": "W 113th St",
+     "path": [
+      {
+       "lat": 40.804636,
+       "lon": -73.962563
+      },
+      {
+       "lat": 40.805803,
+       "lon": -73.965345
+      }
+     ]
+    },
+    {
+     "instruction": "CVS is just to your right on Broadway",
+     "street": "Broadway",
+     "path": [
+      {
+       "lat": 40.805803,
+       "lon": -73.965345
+      },
+      {
+       "lat": 40.805992,
+       "lon": -73.965207
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "amsterdam-psafe",
+   "to": "psafe",
+   "steps": [
+    {
+     "instruction": "Head north on Amsterdam Ave to W 116th St",
+     "street": "Amsterdam Ave",
+     "landmark": "the Cathedral of St. John the Divine on your right",
+     "path": [
+      {
+       "lat": 40.802751,
+       "lon": -73.963944
+      },
+      {
+       "lat": 40.806522,
+       "lon": -73.961182
+      }
+     ]
+    },
+    {
+     "instruction": "Turn left through the gates onto College Walk",
+     "street": "College Walk",
+     "landmark": "the Columbia gates at Amsterdam Ave",
+     "path": [
+      {
+       "lat": 40.806522,
+       "lon": -73.961182
+      },
+      {
+       "lat": 40.807132,
+       "lon": -73.962635
+      }
+     ]
+    },
+    {
+     "instruction": "Go up the steps; the Public Safety desk is inside Low Library",
+     "street": "College Walk",
+     "landmark": "the Alma Mater statue on the steps",
+     "path": [
+      {
+       "lat": 40.807132,
+       "lon": -73.962635
+      },
+      {
+       "lat": 40.807634,
+       "lon": -73.962267
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

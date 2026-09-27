@@ -1,12 +1,15 @@
-import { Spectrum, type Content, type Space } from "spectrum-ts";
+import { attachment, Spectrum, voice as voiceContent, type Content, type Space } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
 import { terminal } from "spectrum-ts/providers/terminal";
+import { basename } from "node:path";
 import { templateForTag } from "../shared/templates.ts";
-import type { Action, ExecuteResult, SendTextTag } from "../shared/types.ts";
+import type { Action, AlertContact, ExecuteResult, SendTextTag } from "../shared/types.ts";
 import type { UserRecord, UserStore } from "../store/index.ts";
+import { markVoiceNoteForwarded } from "../store/voiceNotes.ts";
 import { placeCall, voiceConfigFromEnv } from "../voice/index.ts";
 import type { TalkLinks } from "../voice/talk.ts";
 import type { VonageCalls } from "../voice/vonage.ts";
+import { alertBody, deliverAlert, noticeFor, type AlertTransport } from "./alertDelivery.ts";
 import type { Messenger } from "./index.ts";
 import { copy } from "./copy.ts";
 
@@ -22,7 +25,15 @@ interface InboundBase {
 export type Inbound =
   /** `threadTargetId`: set when the user replied inside a thread (to that message). */
   | (InboundBase & { kind: "text"; messageId: string; text: string; threadTargetId?: string })
-  | (InboundBase & { kind: "reaction"; emoji: string; targetMessageId: string });
+  | (InboundBase & { kind: "reaction"; emoji: string; targetMessageId: string })
+  | (InboundBase & {
+      kind: "voice";
+      messageId: string;
+      mimeType: string;
+      name?: string;
+      read: () => Promise<Buffer>;
+      threadTargetId?: string;
+    });
 
 export interface SpectrumMessenger extends Messenger {
   readonly provider: Provider;
@@ -38,6 +49,8 @@ export interface SpectrumMessenger extends Messenger {
 
 export interface ContactAlertResult {
   ok: boolean;
+  /** Voice-note attachments went out too (true when there were none). */
+  attachmentsOk?: boolean;
   name?: string;
   /** Epoch ms. */
   at: number;
@@ -53,18 +66,45 @@ export interface SpectrumMessengerOptions {
   vonageCalls?: VonageCalls;
 }
 
-function mapsLink(lat: number, lon: number): string {
-  return `https://maps.apple.com/?ll=${lat.toFixed(5)},${lon.toFixed(5)}`;
+interface InboundAudio {
+  mimeType: string;
+  name?: string;
+  read: () => Promise<Buffer>;
+}
+
+/** A voice message, or an audio file sent as an attachment (possibly inside a reply or group). */
+function audioOf(content: Content): InboundAudio | undefined {
+  switch (content.type) {
+    case "voice":
+      return { mimeType: content.mimeType, ...(content.name && { name: content.name }), read: () => content.read() };
+    case "attachment":
+      return content.mimeType.toLowerCase().startsWith("audio/")
+        ? { mimeType: content.mimeType, name: content.name, read: () => content.read() }
+        : undefined;
+    case "reply":
+      return audioOf(content.content as Content);
+    case "group":
+      for (const m of content.items) {
+        const a = audioOf(m.content);
+        if (a) return a;
+      }
+      return undefined;
+    default:
+      return undefined;
+  }
 }
 
 /**
  * Plain text of a message, looking inside in-thread replies and text+attachment
- * groups. A shared contact card becomes "Name +number" so it parses like a typed contact.
+ * groups. A shared contact card becomes "Name +number" so it parses like a typed
+ * contact; a shared Apple Maps place (rich link) becomes its URL.
  */
 function textOf(content: Content): string | undefined {
   switch (content.type) {
     case "text":
       return content.text;
+    case "richlink":
+      return content.url;
     case "reply":
       return textOf(content.content as Content);
     case "contact": {
@@ -148,45 +188,106 @@ export async function createSpectrumMessenger(
     return sent?.id ? { messageId: sent.id } : {};
   }
 
-  async function alertContact(userId: string, text: string, lat: number, lon: number) {
+  async function transportFor(phone: string, label: string): Promise<AlertTransport> {
+    let space: Space | undefined;
+    try {
+      space = await openDm(phone);
+    } catch (err) {
+      // e.g. Photon "Target not allowed for this project".
+      const reason = err instanceof Error ? err.message : String(err);
+      return {
+        sendText: async () => {
+          throw new Error(`can't open chat with ${phone}: ${reason}`);
+        },
+        sendAudio: async () => {
+          throw new Error(`can't open chat with ${phone}: ${reason}`);
+        },
+      };
+    }
+    if (!space) {
+      // Terminal has no second person to text; surface it in the log instead.
+      return {
+        sendText: async (t) => console.log(`[messenger] → trusted contact ${label}:\n${t}`),
+        sendAudio: async (p, m) => console.log(`[messenger] → trusted contact ${label}: [audio ${m}] ${p}`),
+      };
+    }
+    const s = space;
+    return {
+      sendText: async (t) => {
+        await s.send(t);
+      },
+      sendAudio: async (path, mimeType) => {
+        try {
+          await s.send(voiceContent(path, { mimeType, name: basename(path) }));
+        } catch (err) {
+          console.warn(`[messenger] voice send failed, retrying as a file: ${err instanceof Error ? err.message : err}`);
+          await s.send(attachment(path, { mimeType, name: basename(path) }));
+        }
+      },
+    };
+  }
+
+  async function notifyUser(userId: string, notice: ReturnType<typeof noticeFor>, name?: string) {
+    if (!notice) return;
+    const text = {
+      contactAlerted: () => copy.contactAlerted(name),
+      contactUnreachable: () => copy.contactUnreachable(name),
+      emergencyDelivered: () =>
+        copy.emergencyDelivered(name, notice.kind === "emergencyDelivered" ? notice.attachmentsOk : true),
+      emergencyFailed: () => copy.emergencyFailed(name),
+      voiceNoteForwarded: () => copy.voiceNoteForwarded(name),
+      voiceNoteForwardFailed: () => copy.voiceNoteForwardFailed(name),
+    }[notice.kind]();
+    // sendToUser already dedups identical text; one notice per alert.
+    await sendToUser(userId, text).catch(() => {});
+  }
+
+  async function alertContact(action: AlertContact) {
+    const { userId } = action;
     const user = await users.getById(userId);
-    const body = `${text}\n${mapsLink(lat, lon)}`;
+    const body = alertBody(action);
     const contact = user?.trustedContact;
     if (!contact) {
       console.warn(`[messenger] AlertContact for ${userId} but no trusted contact on file:\n${body}`);
       lastAlerts.set(userId, { ok: false, at: Date.now() });
+      if (action.emergency && !action.followUp) await sendToUser(userId, copy.emergencyNoContact).catch(() => {});
       return;
     }
-    const record = (ok: boolean) =>
-      lastAlerts.set(userId, { ok, at: Date.now(), ...(contact.name && { name: contact.name }) });
-    const prevAlert = recentSend.get(`alert:${contact.phone}`);
+    const dedupKey = `alert:${contact.phone}`;
+    const prevAlert = recentSend.get(dedupKey);
     const now = Date.now();
-    if (prevAlert && prevAlert.text === body && now - prevAlert.at < SEND_DEDUP_MS) {
+    const dedupText = `${body}\0${(action.voiceNoteIds ?? []).join(",")}`;
+    if (prevAlert && prevAlert.text === dedupText && now - prevAlert.at < SEND_DEDUP_MS) {
       console.log(`[messenger] dedup skip duplicate alert → ${contact.phone}`);
       return;
     }
-    recentSend.set(`alert:${contact.phone}`, { text: body, at: now });
-    try {
-      const space = await openDm(contact.phone);
-      if (!space) {
-        // Terminal has no second person to text; surface it in the log instead.
-        console.log(`[messenger] → trusted contact ${contact.name ?? ""} ${contact.phone}:\n${body}`);
-        record(true);
-        return;
-      }
-      await space.send(body);
-      record(true);
-      console.log(`[messenger] alerted trusted contact ${contact.name ?? ""} ${contact.phone}`);
-      await sendToUser(userId, copy.contactAlerted(contact.name)).catch(() => {});
-    } catch (err) {
-      record(false);
-      // e.g. Photon "Target not allowed for this project": the user must not assume someone was told.
-      console.error(
-        `[messenger] could NOT alert trusted contact ${contact.phone}: ${err instanceof Error ? err.message : err}`,
+    recentSend.set(dedupKey, { text: dedupText, at: now });
+
+    const transport = await transportFor(contact.phone, `${contact.name ?? ""} ${contact.phone}`.trim());
+    const result = await deliverAlert(transport, action);
+    lastAlerts.set(userId, {
+      ok: result.ok,
+      attachmentsOk: result.attachmentsOk,
+      at: Date.now(),
+      ...(contact.name && { name: contact.name }),
+    });
+    if (result.ok) {
+      console.log(
+        `[messenger] alerted trusted contact ${contact.name ?? ""} ${contact.phone}` +
+          (action.attachments?.length ? ` (attachments ${result.attachmentsOk ? "ok" : "FAILED"})` : ""),
       );
-      // sendToUser already dedups identical text; one notify per failed alert.
-      await sendToUser(userId, copy.contactUnreachable(contact.name)).catch(() => {});
+    } else {
+      console.error(`[messenger] could NOT alert trusted contact ${contact.phone}`);
     }
+    if (result.ok && result.attachmentsOk && action.voiceNoteIds?.length) {
+      const at = new Date();
+      for (const id of action.voiceNoteIds) {
+        await markVoiceNoteForwarded(id, at).catch((e) =>
+          console.warn(`[messenger] markVoiceNoteForwarded failed: ${e instanceof Error ? e.message : e}`),
+        );
+      }
+    }
+    await notifyUser(userId, noticeFor(action, result), contact.name);
   }
 
   async function execute(action: Action): Promise<ExecuteResult> {
@@ -201,18 +302,16 @@ export async function createSpectrumMessenger(
         return result;
       }
       case "AlertContact":
-        await alertContact(action.userId, action.text, action.lat, action.lon);
+        await alertContact(action);
         return {};
       case "StartCall": {
         const user = await users.getById(action.userId);
         if (!user) throw new Error(`StartCall for unknown user ${action.userId}`);
         if (!voice) {
-          // Don't throw — help flows also AlertContact; failing here used to
-          // fire callFailed + ended_unresolved on top of the contact path.
           console.warn(
             `[messenger] StartCall skipped for ${user.handle} (walk ${action.walkId}): calls not configured`,
           );
-          return {};
+          return sendToUser(action.userId, copy.callsUnavailable);
         }
         const contactName = user.trustedContact?.name;
         if (voice.agentPhoneNumberId) {
@@ -262,6 +361,19 @@ export async function createSpectrumMessenger(
       const content = message.content;
       if (content.type === "reaction") {
         yield { ...base, kind: "reaction", emoji: content.emoji, targetMessageId: content.target.id };
+        continue;
+      }
+      const audio = audioOf(content);
+      if (audio) {
+        const threadTargetId = content.type === "reply" ? content.target.id : undefined;
+        const voiceMsg: Inbound = {
+          ...base,
+          kind: "voice",
+          messageId: message.id,
+          ...audio,
+          ...(threadTargetId && { threadTargetId }),
+        };
+        yield voiceMsg;
         continue;
       }
       const text = textOf(content);

@@ -49,3 +49,9 @@ Thumbs.db
 
 # Optional local Docker / DO artifacts
 .docker/
+
+# Local voice previews
+voice-samples/
+
+# Received iMessage voice notes
+data/

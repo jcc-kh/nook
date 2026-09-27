@@ -1,41 +1,59 @@
 import type { NoResponseAction } from "./settings.ts";
 import type { SendTextTag } from "./types.ts";
 
+/**
+ * Tapback shortcuts. Every message that relies on them also says the options in
+ * words, and the legend is appended in code so LLM-written copy can't drop it.
+ */
+export const LEGEND = "reply normally, or use: 👍 safe · 👎 uneasy · ❓ call me · ‼️ immediate danger";
+
+export function withLegend(text: string): string {
+  return `${text}\n${LEGEND}`;
+}
+
 /** Canned copy used when Gemini is absent or fails (L1-L2 default). Friend iMessage voice. */
 export const templates = {
-  prompt: "heading home? 👍",
-  started: "ok i'm with you. only texting if something looks off. text stop anytime, or call me if you need me",
-  checkin: "you good? 👍 or just text me (or stop to dismiss)",
-  nudge: "still there? tap 👍 so i know, or text stop",
+  prompt: "heading home?",
+  started: "ok i'm with you. i'll only text if something looks off.",
+  checkin: "you good?",
+  nudge: "still there? reply ok if you're fine, or tell me what's going on",
   arrived: "home safe 👍 night!",
   ended: "ok wrapping up, looks like you're staying put",
-  unclear: "wait what? 👍 if you're good, text stop to dismiss, or just text me",
-  checkinOffRoute: "this isn't your usual way home. all good? 👍 or tell me where you're headed (or stop)",
-  checkinNoUpdate: "haven't seen your location in a bit. you ok? 👍 or text stop",
-  finalNudge: "still nothing. tap 👍 when you can, or text stop and i'll back off",
+  unclear: "didn't catch that. are you okay, feeling uneasy, want me to call, or in immediate danger?",
+  checkinOffRoute: "this isn't your usual way home. all good? or tell me where you're headed",
+  checkinNoUpdate: "haven't seen your location in a bit. you ok?",
+  finalNudge: "still nothing. reply ok when you can, or text stop and i'll back off",
   /** After they 👍'd a dwell check-in but are still parked away from home. */
   lingerOffer:
-    "you haven't moved for a while but you 👍'd my last one so i'm assuming you're good. 👍 if you still want me keeping tabs, or text stop",
+    "you haven't moved for a while but you said you were good, so i'm assuming you're fine. reply yes if you still want me keeping tabs, or text stop",
   lingerDrop: "cool, i'll stop hovering. text walk me home anytime",
 } as const satisfies Record<string, string>;
 
 export type TemplateKey = keyof typeof templates;
 
-export type ContactAlertKind = "quiet" | "offroute" | "help";
+/** Lines appended to every trip start: hands-free calls and destination sharing. */
+export const TRIP_START_EXTRAS =
+  "ask me to call anytime for hands-free guidance. heading somewhere other than home? share the apple maps place or directions here and i'll use that route. text stop anytime.";
+
+export function tripStart(lead: string): string {
+  return `${lead}\n\n${LEGEND}\n\n${TRIP_START_EXTRAS}`;
+}
+
+export type ContactAlertKind = "quiet" | "offroute" | "unconfirmed";
 
 /**
- * Text to the trusted contact, who is only texted when something is wrong and
- * may never have heard of Nook. `who` is the user's name when Nook has one.
+ * Non-emergency text to the trusted contact (a check-in went unanswered), who
+ * may never have heard of Nook. `who` is the user's name and number.
  */
-export function contactAlert(kind: ContactAlertKind, who: string): string {
-  const intro = `hey, ${who} has you as their get-home contact on nook.`;
+export function contactAlert(kind: ContactAlertKind, who: string, quote?: string): string {
+  const intro = `hey, this is nook. ${who} has you as their get-home contact.`;
   switch (kind) {
     case "quiet":
-      return `${intro} they're out and haven't answered me. last location below.`;
+      return `${intro} they're out and haven't answered my check-ins for a few minutes. last location below. could you check on them?`;
     case "offroute":
-      return `${intro} they went off their usual route and went quiet. last location below.`;
-    case "help":
-      return `${intro} they need help, please check on them. last location below.`;
+      return `${intro} they went off their usual route and haven't answered my check-ins. last location below. could you check on them?`;
+    case "unconfirmed":
+      return `${intro} they texted me "${quote ?? "help"}" and haven't answered since. last location below. please check on them.`;
   }
 }
 
@@ -48,14 +66,9 @@ function waitLabel(sec: number): string {
 /** Appended to the nudge so the user knows what their no-reply setting will do next. */
 export function nextStepLine(action: NoResponseAction, afterSec: number, contactName?: string): string {
   const them = contactName ?? "your person";
-  const within = `if i don't hear back in ${waitLabel(afterSec)}`;
   switch (action) {
-    case "CALL_USER":
-      return `${within} i'll call you`;
     case "CONTACT_TRUSTED":
-      return `${within} i'll text ${them}`;
-    case "CALL_THEN_CONTACT":
-      return `${within} i'll call you, then text ${them}`;
+      return `if i don't hear back in ${waitLabel(afterSec)} i'll text ${them} your location`;
     case "NONE":
       return "";
   }

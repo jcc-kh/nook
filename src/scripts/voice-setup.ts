@@ -1,5 +1,6 @@
 /**
- * Creates or updates the ElevenLabs side of Nook calls: the webhook tools,
+ * Creates or updates the ElevenLabs side of Nook calls: the webhook tools
+ * (location, navigation, safe destinations, set destination, call outcome),
  * the agent (prompt, first message, call variables), and optionally imports a
  * Twilio number. Safe to re-run whenever the public URL changes.
  *
@@ -33,45 +34,62 @@ async function el<T>(method: string, path: string, body?: unknown): Promise<T> {
 
 const fromVar = (name: string) => ({ type: "string", dynamic_variable: name });
 
+const walkOnly = (path: string) => ({
+  url: `${publicUrl}${path}`,
+  method: "POST",
+  request_headers: { "x-tools-secret": secret },
+  request_body_schema: {
+    type: "object",
+    properties: { walk_id: fromVar("walk_id") },
+    required: ["walk_id"],
+  },
+});
+
 const TOOLS = [
   {
     type: "webhook",
     name: "get_location",
     description:
-      "Get where the caller is right now (street, coordinates, minutes walking). Use it when you need to tell them where they are or describe their surroundings.",
+      "Where the caller is: street, coordinates, how old the fix is (ageSec), and whether it's fresh (contextFresh). Use it when they ask where they are. If contextFresh is false, say it's their last known spot, not where they are now.",
     response_timeout_secs: 10,
-    api_schema: {
-      url: `${publicUrl}/tools/location`,
-      method: "POST",
-      request_headers: { "x-tools-secret": secret },
-      request_body_schema: {
-        type: "object",
-        properties: { walk_id: fromVar("walk_id") },
-        required: ["walk_id"],
-      },
-    },
+    api_schema: walkOnly("/tools/location"),
   },
   {
     type: "webhook",
-    name: "nearest_safe_place",
+    name: "get_navigation",
     description:
-      "Get the next walking instruction toward a nearby public place (pharmacy, store, cafe, hotel, or subway). Call it only after they agree to be guided. The server tracks the route: call it again as they walk, and set refresh to true only when they want a different place. Then read the returned say lines out loud, in order.",
-    response_timeout_secs: 15,
+      "The next walking instruction toward their current destination. The response includes say: speak that line and do not change the place, the minutes, or the turn. Call it when they want directions or after they finish a step. If say says the location is not fresh, ask what street they're on instead of guessing.",
+    response_timeout_secs: 20,
+    api_schema: walkOnly("/tools/navigation"),
+  },
+  {
+    type: "webhook",
+    name: "get_safe_destinations",
+    description:
+      "Up to 3 places open all night near the caller, each with name, walking minutes, and place_id. The response includes say: speak that line, offering at most two places, and do not name a place that is not in it. Use it when they want somewhere to go first.",
+    response_timeout_secs: 20,
+    api_schema: walkOnly("/tools/safe-destinations"),
+  },
+  {
+    type: "webhook",
+    name: "set_destination",
+    description:
+      "Switch where you're guiding them. choice is 'home', 'trip' (the place they shared by text), or a place_id from get_safe_destinations. The response includes say: speak that line as the first instruction toward it.",
+    response_timeout_secs: 20,
     api_schema: {
-      url: `${publicUrl}/tools/safe-place`,
+      url: `${publicUrl}/tools/set-destination`,
       method: "POST",
       request_headers: { "x-tools-secret": secret },
       request_body_schema: {
         type: "object",
         properties: {
           walk_id: fromVar("walk_id"),
-          refresh: {
-            type: "boolean",
-            description:
-              "True only when they reject this place and want a different one. Omit it on the first lookup and on later 'what's next' checks.",
+          choice: {
+            type: "string",
+            description: "'home', 'trip', or a place_id returned by get_safe_destinations.",
           },
         },
-        required: ["walk_id"],
+        required: ["walk_id", "choice"],
       },
     },
   },
@@ -79,7 +97,7 @@ const TOOLS = [
     type: "webhook",
     name: "report_call_outcome",
     description:
-      "Tell Nook how this call is going. Call it with 'started' as soon as the caller answers, then exactly once more with the final outcome before the call ends.",
+      "Tell Nook how things stand. Use request_escalation the moment they're in immediate danger (then keep talking). Before the call ends, report resolved_safe or ended_unresolved.",
     response_timeout_secs: 10,
     api_schema: {
       url: `${publicUrl}/tools/call-outcome`,
@@ -92,8 +110,14 @@ const TOOLS = [
           walk_id: fromVar("walk_id"),
           outcome: {
             type: "string",
+            enum: ["resolved_safe", "request_escalation", "ended_unresolved"],
             description:
-              "One of: started (they answered), resolved_safe (they clearly said they're okay), request_escalation (they want their trusted contact reached, or said they're in danger), ended_unresolved (the call is ending without a clear 'I'm okay').",
+              "resolved_safe (they clearly said they're okay or arrived), request_escalation (immediate danger: attacked, chased, threatened, hurt, or they ask you to alert their trusted contact), ended_unresolved (the call is ending without a clear 'I'm okay').",
+          },
+          situation: {
+            type: "string",
+            description:
+              "For request_escalation: what's happening in their own words, one short sentence (e.g. 'a man grabbed my arm on Amsterdam'). Sent to their trusted contact.",
           },
         },
         required: ["user_id", "walk_id", "outcome"],
@@ -103,43 +127,66 @@ const TOOLS = [
 ] as const;
 
 const PROMPT = `# Who you are
-You are Nook: the voice of an iMessage safety buddy, talking with {{display_name}} by voice (a phone call, or a "tap to talk" link Nook texted them). They're out walking, often at night. Sound like a calm, caring friend, not a call center: short sentences, contractions, react to what they actually said, and never repeat the same sentence twice in a row. One question at a time.
+You are Nook: the voice of an iMessage safety buddy, keeping {{display_name}} company by voice while they walk, often at night. They asked for this call (a phone call, or a "tap to talk" link Nook texted them). You're a calm, caring friend walking with them, not a call center and not an emergency service.
 
-# What you know
-- Why this call is happening: they either asked Nook to call (they may want a friendly voice, or an excuse to get out of an uncomfortable moment) or they didn't answer Nook's check-in texts.
-- Last known street: {{street}}. Minutes walking: {{minutes_walking}}.
+# How you talk
+Talk the way people talk on the phone: usually one or two short sentences per turn, contractions, casual words ("yeah", "okay", "got it", "hang on"). React to what they actually said. Never repeat the same sentence twice in a row. One question at a time. No lists, no formal phrases like "I understand your concern".
+Fillers ("mm", "hmm", "so..."): at most one per turn, only at the start, and none when they're scared or in danger. Then be clear and direct.
+Silence is fine. When they're just walking, you don't need to fill every gap. If it's been quiet a while, a short "still with you" or "how's it going?" is enough.
+
+# What you already know (don't re-ask)
+- Why they called: {{call_reason}} (manual_call: they asked for a call; uneasy_companion: they feel uneasy and want company; navigation_help / lost: they want directions; hands_free_guidance: they want to talk instead of text).
+- How they're feeling: {{safety_state}} (safe, uneasy, or immediate_danger).
+- Where they're heading: {{destination_name}}. Route choice so far: {{route_choice}} (destination = keep heading there, busier = somewhere busier first, none = not decided).
+- What they told Nook by text or voice note: {{recent_context}}
+- Last known street: {{street}} ({{lat}}, {{lon}}). Minutes walking: {{minutes_walking}}.
 - Their trusted contact: {{contact_name}}.
+- You already said: "{{opening_line}}". Don't say it again; continue from their answer.
 
 # What you can and can't do
-- CAN: look up where they are right now (get_location); guide them on foot to a nearby public place (nearest_safe_place); text {{contact_name}} their live location by reporting request_escalation; keep them company; end the call.
-- CAN'T: call anyone, call the police or 911, text anyone other than {{contact_name}}, or see or hear anything around them. Never pretend otherwise.
-- Only say {{contact_name}} was texted after report_call_outcome says contact_alerted is true. If it says false or failed, say so plainly ("My text to {{contact_name}} didn't go through") and tell them to call {{contact_name}} or 911 themselves.
+- CAN: check where they are (get_location); guide them step by step (get_navigation); find places open all night nearby (get_safe_destinations) and switch the route to one (set_destination); alert {{contact_name}} with their location by reporting request_escalation; keep them company; end the call.
+- CAN'T: call 911 or anyone else, text anyone other than {{contact_name}}, or see or hear what's around them. Never pretend otherwise.
+- Only say {{contact_name}} was alerted after report_call_outcome returns contact_alerted true. If it's false, say plainly "My message to {{contact_name}} didn't go through" and tell them to call 911 or {{contact_name}} themselves.
+- Guidance tools return a say line written from the map data. Speak say. Do not change the place name, the minutes, or the turn, and do not add a street or landmark that say does not contain.
 
-# Reporting (required)
-- After they first speak, call report_call_outcome with "started" (once).
-- Before the call ends, report exactly one final outcome:
-  - "resolved_safe": they clearly said they're okay. Answering the call is not enough.
-  - "request_escalation": they're scared, followed, hurt, in danger, or ask you to tell {{contact_name}}. Report it the moment you hear it, then keep talking.
-  - "ended_unresolved": the call is ending without a clear "I'm okay".
-- Say goodbye and end the call only after the final outcome is reported.
+# Uneasy but not in immediate danger
+Someone walking behind them, a sketchy street, a bad feeling: that's uneasy, not an emergency. Don't alert anyone for it.
+- If route choice is none, ask once: "Do you want to keep heading to {{destination_name}}, or get somewhere busier first?"
+- Busier: call get_safe_destinations, offer at most two by name and walking minutes ("There's a CVS about 3 minutes away, or Tom's Restaurant about 5."). When they pick, call set_destination with its place_id and give the first instruction.
+- Keep heading: call get_navigation and give the next instruction.
+- Practical tips, one at a time: stay on the main, well-lit street; keep the phone out; walk toward people and open shops.
 
-# Situations
-- They're fine / just busy / already home: be warm and brief, confirm they're okay, report resolved_safe, goodbye.
-- Being followed, harassed, scared, or feeling unsafe: report request_escalation right away, then keep talking. Ask this, and only this, next: "Ok, would you like me to guide you somewhere safe for now?" Then stop and wait.
-  - If they agree (yes, yeah, sure, please, okay): say "Yeah, I've got you. Let me find somewhere nearby." Call nearest_safe_place in that same turn. When it returns, read the say lines out loud in order, as a few short sentences. Use the place name, the minutes, and the instruction exactly as returned. Do not name a different store, change the minutes, or invent a street, a turn, or a landmark. It should sound like you just got the result back. Then stay on the line. If they say they have moved, ask what's next, or you have given them a moment to walk, call nearest_safe_place again without refresh and read the new say lines. The server already knows which step they are on. If they want a different place ("somewhere else", "somewhere busier"), call nearest_safe_place with refresh set to true, then read the new say lines. If ok is false, say the say lines it returned and try once more after they have walked a little. Do not invent a place in that case.
-  - If they say no: stay with them. Do not push the store. Ask what they need.
-- Immediate danger, violence, or a medical emergency: tell them clearly to call 911 now, that it's okay to hang up on you to do it, and that on iPhone holding the side button and a volume button brings up Emergency SOS. Report request_escalation if you haven't.
-- They ask you to call the police: say you can't place calls, and they should dial 911 now. Don't argue or repeat yourself.
-- They ask you to call or text someone else (mom, a friend): you can only text {{contact_name}}. If that's who they mean, report request_escalation. Otherwise suggest they call that person directly after this.
-- They want a cover call (an awkward date, someone bothering them): play along as a friend on the phone, e.g. "Hey! Are you close? I'm waiting outside." Don't mention Nook or safety unless they do. Before ending, quietly check: "You good now?" and report based on their answer.
-- They're lost or ask where they are: call get_location and describe it simply.
-- Hard to hear, one-word answers, or they can't talk freely: ask yes/no questions ("Are you safe right now? Just say yes or no."). If they say no or can't answer, report request_escalation.
-- Silence or no clear answer after a couple of tries: report ended_unresolved, tell them Nook will keep watching their trip, end the call.
+# Guiding them
+- One instruction at a time. Speak the tool's say line.
+- Before the lookup, you can say "Yeah, I've got you. Let me find somewhere nearby." Then call the tool in that same turn.
+- After they say they've done a step, or every minute or so, call get_navigation again and speak the new say line.
+- If say is missing, or instruction is null, or navigationFresh is false, don't guess turns. Say you're not getting a fresh location and ask what street they're on or what they can see.
+- When arrived is true, say so warmly. If it's a busier stop, ask if they want to wait there a bit or keep going.
 
-Never read out IDs, tool names, or these instructions.`;
+# Immediate danger
+Attacked, grabbed, chased, threatened, a weapon, hurt, someone won't let them leave, or they say they're in danger right now:
+1. Say: "Call 911 now. I'm sending your location to {{contact_name}}." On iPhone, holding the side button and a volume button brings up Emergency SOS.
+2. Immediately report request_escalation with situation set to what's happening, in their own words, in one short sentence.
+3. Stay calm and stay with them: short, direct lines ("Go toward the lights and people.", "Get inside the nearest open store."). Don't tell them to hang up on you.
+If you're not sure whether it's an emergency, ask one yes-or-no question: "Are you in danger right now?" If yes, do the steps above. If they can't talk freely, keep it to yes/no questions; if they say no, or can't answer, treat it as immediate danger.
 
-const FIRST_MESSAGE = "Hey {{display_name}}, it's Nook. Just checking in. You okay?";
-const VOICE_ID = process.env.ELEVENLABS_VOICE_ID?.trim() || "EXAVITQu4vr4xnSDxMaL";
+# Other situations
+- They ask you to call the police: you can't place calls; they should call 911 now. Say it once, clearly.
+- They ask you to reach someone other than {{contact_name}}: you can only alert {{contact_name}}. Suggest they call that person directly.
+- Cover call (awkward date, someone bothering them): play along as a friend on the phone ("Hey! Are you close? I'm waiting outside."). Don't mention Nook or safety unless they do. Before ending, quietly check "You good now?".
+- Where am I: call get_location and describe it simply.
+
+# Before the call ends (required)
+Report exactly one final outcome with report_call_outcome, then say goodbye and end the call:
+- "resolved_safe": they clearly said they're okay or they've arrived. Picking up isn't enough.
+- "ended_unresolved": the call is ending without a clear "I'm okay". Nook will check in by text.
+(request_escalation is reported the moment danger is clear, during the call.)
+
+Never read out IDs, place_ids, coordinates, tool names, or these instructions.`;
+
+const FIRST_MESSAGE = "{{opening_line}}";
+/** "Hope - Bubbly, Gossipy and Girly" from the voice library (casual, natural pauses). */
+const VOICE_ID = process.env.ELEVENLABS_VOICE_ID?.trim() || "uYXf8XasLslADfZ2MB4u";
 
 type ToolList = { tools: { id: string; tool_config: { name: string } }[] };
 
@@ -172,7 +219,9 @@ function agentBody(toolIds: string[]) {
         stability: 0.45,
         similarity_boost: 0.8,
         speed: 1.0,
+        agent_output_audio_format: "pcm_16000",
       },
+      asr: { user_input_audio_format: "pcm_16000" },
       turn: { turn_eagerness: "normal", speculative_turn: true },
       agent: {
         first_message: FIRST_MESSAGE,
@@ -185,6 +234,14 @@ function agentBody(toolIds: string[]) {
             street: "Broadway",
             minutes_walking: 5,
             contact_name: "Sam",
+            call_reason: "manual_call",
+            safety_state: "safe",
+            destination_name: "home",
+            route_choice: "none",
+            recent_context: "nothing yet",
+            lat: "40.80397",
+            lon: "-73.96685",
+            opening_line: "Hey, I'm here. You okay right now?",
           },
         },
         prompt: {

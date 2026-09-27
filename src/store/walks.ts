@@ -1,5 +1,5 @@
 import { query } from "./db.ts";
-import type { WalkPhase, WalkPlan } from "../shared/types.ts";
+import type { Destination, RouteChoice, SafetyState, WalkPhase, WalkPlan } from "../shared/types.ts";
 
 export async function insertWalk(row: {
   walkId: string;
@@ -53,6 +53,40 @@ export async function updateWalkStatus(
   }
 }
 
+/** Persisted safety fields on a walk. Keys present are written; null clears. */
+export interface WalkSafetyPatch {
+  safetyState?: SafetyState | null;
+  routeChoice?: RouteChoice | null;
+  destination?: Destination | null;
+  interim?: Destination | null;
+  expectedMin?: number;
+  lateMin?: number;
+}
+
+export async function updateWalkSafety(walkId: string, patch: WalkSafetyPatch): Promise<void> {
+  const cols: Record<string, unknown> = {};
+  const has = (k: keyof WalkSafetyPatch) => Object.prototype.hasOwnProperty.call(patch, k);
+  if (has("safetyState")) cols.safety_state = patch.safetyState ?? null;
+  if (has("routeChoice")) cols.route_choice = patch.routeChoice ?? null;
+  if (has("destination")) {
+    cols.dest_name = patch.destination?.name ?? null;
+    cols.dest_lat = patch.destination?.lat ?? null;
+    cols.dest_lon = patch.destination?.lon ?? null;
+    cols.dest_address = patch.destination?.address ?? null;
+  }
+  if (has("interim")) {
+    cols.interim_name = patch.interim?.name ?? null;
+    cols.interim_lat = patch.interim?.lat ?? null;
+    cols.interim_lon = patch.interim?.lon ?? null;
+  }
+  if (has("expectedMin")) cols.expected_min = patch.expectedMin;
+  if (has("lateMin")) cols.late_min = patch.lateMin;
+  const entries = Object.entries(cols);
+  if (entries.length === 0) return;
+  const sets = entries.map(([c], i) => `${c} = $${i + 2}`).join(", ");
+  await query(`UPDATE walks SET ${sets} WHERE walk_id = $1`, [walkId, ...entries.map(([, v]) => v)]);
+}
+
 export async function getOpenWalk(userId: string): Promise<{
   walkId: string;
   status: WalkPhase;
@@ -63,6 +97,10 @@ export async function getOpenWalk(userId: string): Promise<{
   originLon: number | null;
   expectedMin: number | null;
   lateMin: number | null;
+  safetyState: SafetyState | null;
+  routeChoice: RouteChoice | null;
+  destination: Destination | null;
+  interim: Destination | null;
 } | null> {
   const res = await query<{
     walk_id: string;
@@ -74,15 +112,24 @@ export async function getOpenWalk(userId: string): Promise<{
     origin_lon: number | null;
     expected_min: number | null;
     late_min: number | null;
+    safety_state?: string | null;
+    route_choice?: string | null;
+    dest_name?: string | null;
+    dest_lat?: number | null;
+    dest_lon?: number | null;
+    dest_address?: string | null;
+    interim_name?: string | null;
+    interim_lat?: number | null;
+    interim_lon?: number | null;
   }>(
-    `SELECT walk_id, status, started_at, trigger, origin_cell, origin_lat, origin_lon,
-            expected_min, late_min
-     FROM walks WHERE user_id = $1 AND ended_at IS NULL
+    `SELECT * FROM walks WHERE user_id = $1 AND ended_at IS NULL
      ORDER BY started_at DESC LIMIT 1`,
     [userId],
   );
   const r = res.rows[0];
   if (!r) return null;
+  const safety = r.safety_state;
+  const choice = r.route_choice;
   return {
     walkId: r.walk_id,
     status: r.status,
@@ -93,6 +140,22 @@ export async function getOpenWalk(userId: string): Promise<{
     originLon: r.origin_lon,
     expectedMin: r.expected_min,
     lateMin: r.late_min,
+    safetyState: safety === "safe" || safety === "uneasy" || safety === "immediate_danger" ? safety : null,
+    routeChoice: choice === "destination" || choice === "busier" ? choice : null,
+    destination:
+      r.dest_name && r.dest_lat != null && r.dest_lon != null
+        ? {
+            name: r.dest_name,
+            lat: r.dest_lat,
+            lon: r.dest_lon,
+            ...(r.dest_address && { address: r.dest_address }),
+            source: "stored",
+          }
+        : null,
+    interim:
+      r.interim_name && r.interim_lat != null && r.interim_lon != null
+        ? { name: r.interim_name, lat: r.interim_lat, lon: r.interim_lon, source: "safe_place" }
+        : null,
   };
 }
 

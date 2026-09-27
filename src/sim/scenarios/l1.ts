@@ -196,9 +196,9 @@ async function main() {
       (a: Action) =>
         a.type === "SendText" &&
         a.tag === "started" &&
-        /walk you home/i.test(a.text),
+        /back with you on this trip/i.test(a.text),
     ),
-    "R3 soft-rejoin: expected nightOut, not worried check-in",
+    "R3 soft-rejoin: expected softRejoin, not worried check-in",
   );
   assert(
     !rejoin.some(

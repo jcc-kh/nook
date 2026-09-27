@@ -52,6 +52,7 @@ async function main() {
     userId: DEMO.userId,
     handle: DEMO.handle,
     contact: DEMO.contact,
+    trustedContact: { phone: DEMO.contact, name: "Sam" },
     homeLat: DEMO.homeLat,
     homeLon: DEMO.homeLon,
     nightStart: DEMO.nightStart,
@@ -191,7 +192,7 @@ async function main() {
     clock.advance(60_000);
     const final = await brain.tick(clock.now());
     assert(
-      final.some((a) => a.type === "SendText" && a.text.includes("won't reach out")),
+      final.some((a) => a.type === "SendText" && a.text.includes("still nothing")),
       "NONE: final nudge",
     );
     assert(
@@ -204,14 +205,15 @@ async function main() {
     console.log("R10 NONE floor ok");
   }
 
-  // R10 policy: CALL_USER with custom 30 s / 30 s timeouts
+  // R10 policy: CONTACT_TRUSTED with custom 30 s / 30 s timeouts. Silence never places a call.
   {
     const clock = new SimClock(night());
     const brain = createBrainEngine({
       clock,
       getUser: async () => ({
         ...(await getUser()),
-        escalation: { initialAction: "TEXT_USER" as const, onNoTextResponse: "CALL_USER" as const },
+        trustedContact: { phone: DEMO.contact, name: "Sam" },
+        escalation: { initialAction: "TEXT_USER" as const, onNoTextResponse: "CONTACT_TRUSTED" as const },
         timeouts: { nudgeAfterSec: 30, escalateAfterSec: 30 },
       }),
       persist: true,
@@ -228,13 +230,13 @@ async function main() {
     await brain.tick(clock.now());
     clock.advance(30_000);
     const nudge = await brain.tick(clock.now());
-    assert(nudge.some((a) => a.type === "SendText" && a.tag === "nudge"), "CALL_USER: nudge at 30 s");
+    assert(nudge.some((a) => a.type === "SendText" && a.tag === "nudge"), "CONTACT_TRUSTED: nudge at 30 s");
     clock.advance(30_000);
-    const call = await brain.tick(clock.now());
-    assert(call.some((a) => a.type === "StartCall"), "CALL_USER: StartCall at 60 s");
-    assert(!call.some((a) => a.type === "AlertContact"), "CALL_USER: no contact");
-    assert(brain.getPhase(DEMO.userId) === "CALLING", "CALL_USER: CALLING");
-    console.log("R10 CALL_USER + custom timeouts ok");
+    const alert = await brain.tick(clock.now());
+    assert(alert.some((a) => a.type === "AlertContact"), "CONTACT_TRUSTED: contact at 60 s");
+    assert(!alert.some((a) => a.type === "StartCall"), "CONTACT_TRUSTED: never calls");
+    assert(brain.getPhase(DEMO.userId) === "ALERTED", "CONTACT_TRUSTED: ALERTED");
+    console.log("R10 CONTACT_TRUSTED + custom timeouts ok");
   }
 
   // R9a + R10

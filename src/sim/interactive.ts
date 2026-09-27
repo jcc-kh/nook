@@ -75,7 +75,7 @@ const getUser = async () => ({
 const brain = createBrainEngine({
   clock,
   getUser,
-  parseReply: llm.parseReply,
+  classify: llm.classify,
   writeMessages: llm.writeMessages,
   persist: false,
   verbose: true,

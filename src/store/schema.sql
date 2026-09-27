@@ -24,7 +24,10 @@ CREATE INDEX IF NOT EXISTS users_handle_idx ON users (handle);
 -- Onboarding / settings (Person A). `contact` = trusted contact phone.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS trusted_name TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS monitoring_mode TEXT;            -- MANUAL | EVENINGS | AWAY_FROM_HOME
-ALTER TABLE users ADD COLUMN IF NOT EXISTS escalation_on_no_response TEXT;  -- CALL_USER | CONTACT_TRUSTED | CALL_THEN_CONTACT | NONE
+ALTER TABLE users ADD COLUMN IF NOT EXISTS escalation_on_no_response TEXT;  -- CONTACT_TRUSTED | NONE
+-- Calls are no longer an escalation step.
+UPDATE users SET escalation_on_no_response = 'CONTACT_TRUSTED' WHERE escalation_on_no_response = 'CALL_THEN_CONTACT';
+UPDATE users SET escalation_on_no_response = 'NONE' WHERE escalation_on_no_response = 'CALL_USER';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS nudge_after_sec INTEGER;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS escalate_after_sec INTEGER;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS no_update_min INTEGER;
@@ -75,6 +78,34 @@ CREATE TABLE IF NOT EXISTS walks (
 
 CREATE INDEX IF NOT EXISTS walks_user_started_idx ON walks (user_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS walks_open_idx ON walks (user_id) WHERE ended_at IS NULL;
+
+-- Safety state and the active destination (home, a shared Apple Maps place, or a safer stop).
+ALTER TABLE walks ADD COLUMN IF NOT EXISTS safety_state TEXT;   -- safe | uneasy | immediate_danger
+ALTER TABLE walks ADD COLUMN IF NOT EXISTS route_choice TEXT;   -- destination | busier
+ALTER TABLE walks ADD COLUMN IF NOT EXISTS dest_name TEXT;
+ALTER TABLE walks ADD COLUMN IF NOT EXISTS dest_lat DOUBLE PRECISION;
+ALTER TABLE walks ADD COLUMN IF NOT EXISTS dest_lon DOUBLE PRECISION;
+ALTER TABLE walks ADD COLUMN IF NOT EXISTS dest_address TEXT;
+ALTER TABLE walks ADD COLUMN IF NOT EXISTS interim_name TEXT;
+ALTER TABLE walks ADD COLUMN IF NOT EXISTS interim_lat DOUBLE PRECISION;
+ALTER TABLE walks ADD COLUMN IF NOT EXISTS interim_lon DOUBLE PRECISION;
+
+-- ---------------------------------------------------------------------------
+-- voice_notes: iMessage voice notes (audio kept on disk under data/voice-notes)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS voice_notes (
+  id            TEXT PRIMARY KEY,           -- iMessage message id
+  user_id       TEXT NOT NULL REFERENCES users(user_id),
+  walk_id       TEXT,
+  received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  path          TEXT NOT NULL,
+  mime_type     TEXT NOT NULL,
+  transcript    TEXT,
+  status        TEXT NOT NULL,              -- transcribed | failed
+  forwarded_at  TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS voice_notes_user_idx ON voice_notes (user_id, received_at DESC);
 
 -- ---------------------------------------------------------------------------
 -- stops
