@@ -35,19 +35,19 @@ export function createGeminiClient(apiKey: string): {
   const writeMessages: WriteMessages = async (plan: WalkPlan) => {
     try {
       const raw = await generateJson(
-        `You write short iMessage copy for Nook, a walk-home safety buddy.
-Tone: calm, warm, brief (under 100 chars each). No emojis except optional 👍 on prompt/checkin.
+        `You write short iMessage texts for Nook — a friend who walks someone home at night.
+Tone: like texting a close friend. lowercase ok. brief (under ~90 chars). casual, not chatbotty or corporate. optional 👍 only.
 Return JSON with exactly these string keys: prompt, checkin, nudge, arrived, ended, unclear.
 
 Context: expected walk ~${Math.round(plan.expectedMin)} min, late after ~${Math.round(plan.lateMin)} min, ${plan.stops.length} known stop(s) on route.
 
 Meanings:
-- prompt: ask if they're heading home (night movement detected)
-- checkin: quick "you ok?" during a walk
-- nudge: follow-up when they haven't replied
-- arrived: confirm they got home
-- ended: walk ended somewhere else
-- unclear: didn't understand their reply`,
+- prompt: casual "heading home?" when night movement shows up
+- checkin: quick "you good?" mid-walk
+- nudge: follow-up when they ghosted a check-in
+- arrived: they made it home
+- ended: walk wrapped somewhere else
+- unclear: didn't get what they said`,
       );
       const obj = raw as Record<string, unknown>;
       const pick = (key: string, fallback: string) =>

@@ -1,18 +1,22 @@
 import type { NoResponseAction } from "./settings.ts";
 import type { SendTextTag } from "./types.ts";
 
-/** Canned copy used when Gemini is absent or fails (L1–L2 default). */
+/** Canned copy used when Gemini is absent or fails (L1–L2 default). Friend iMessage voice. */
 export const templates = {
-  prompt: "Heading home? 👍",
-  started: "Got it, I'm with you until you're home. I'll only check in if something looks off. Text 'call me' anytime.",
-  checkin: "You ok? Tap 👍 or text me.",
-  nudge: "Still there? Tap 👍 so I know you're alright.",
-  arrived: "I see that you got home safe. Have a good rest!",
-  ended: "Walk ended — staying somewhere else tonight.",
-  unclear: "Didn't catch that — tap 👍 if you're good, or text me.",
-  checkinOffRoute: "Looks like you're off your usual route. All good? Tap 👍 or tell me where you're headed.",
-  checkinNoUpdate: "I haven't had a location update from you in a few minutes. You ok? Tap 👍 or text me.",
-  finalNudge: "Haven't heard back. Tap 👍 when you can — I won't reach out to anyone.",
+  prompt: "heading home? 👍",
+  started: "ok i'm with you — only texting if something looks off. text call me anytime",
+  checkin: "you good? 👍 or just text me",
+  nudge: "still there? tap 👍 so i know",
+  arrived: "home safe 👍 night!",
+  ended: "ok wrapping up — looks like you're staying put",
+  unclear: "wait what — 👍 if you're good or just text me",
+  checkinOffRoute: "this isn't your usual way home — all good? 👍 or tell me where you're headed",
+  checkinNoUpdate: "haven't seen your location in a bit — you ok? 👍",
+  finalNudge: "still nothing — tap 👍 when you can, i won't bug anyone yet",
+  /** After they 👍'd a dwell check-in but are still parked away from home. */
+  lingerOffer:
+    "you haven't moved for a while but you 👍'd my last one so i'm assuming you're good. if you still want me keeping tabs, 👍 this",
+  lingerDrop: "cool, i'll stop hovering. text walk me home anytime",
 } as const satisfies Record<string, string>;
 
 export type TemplateKey = keyof typeof templates;
@@ -24,14 +28,14 @@ export type ContactAlertKind = "quiet" | "offroute" | "help";
  * may never have heard of Nook. `who` is the user's name or number.
  */
 export function contactAlert(kind: ContactAlertKind, who: string): string {
-  const intro = `Nook here: ${who} added you as their trusted contact for getting home safe.`;
+  const intro = `hey — ${who} has you as their get-home contact on nook.`;
   switch (kind) {
     case "quiet":
-      return `${intro} They're out and haven't answered my check-ins. Last known location below.`;
+      return `${intro} they're out and haven't answered me. last location below.`;
     case "offroute":
-      return `${intro} They went off their usual route and haven't answered my check-ins. Last known location below.`;
+      return `${intro} they went off their usual route and went quiet. last location below.`;
     case "help":
-      return `${intro} They need help. Please check on them now. Last known location below.`;
+      return `${intro} they need help — please check on them. last location below.`;
   }
 }
 
@@ -43,15 +47,15 @@ function waitLabel(sec: number): string {
 
 /** Appended to the nudge so the user knows what their no-reply setting will do next. */
 export function nextStepLine(action: NoResponseAction, afterSec: number, contactName?: string): string {
-  const them = contactName ?? "your trusted contact";
-  const within = `If I don't hear back in ${waitLabel(afterSec)}`;
+  const them = contactName ?? "your person";
+  const within = `if i don't hear back in ${waitLabel(afterSec)}`;
   switch (action) {
     case "CALL_USER":
-      return `${within}, I'll call you.`;
+      return `${within} i'll call you`;
     case "CONTACT_TRUSTED":
-      return `${within}, I'll text ${them}.`;
+      return `${within} i'll text ${them}`;
     case "CALL_THEN_CONTACT":
-      return `${within}, I'll call you, then text ${them}.`;
+      return `${within} i'll call you, then text ${them}`;
     case "NONE":
       return "";
   }

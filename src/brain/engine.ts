@@ -51,6 +51,10 @@ const PROMPT_TIMEOUT_MS = 10 * 60_000;
 const CHECKIN_RATE_MS = 3 * 60_000;
 /** Quiet period after the user answers a check-in. */
 const CHECKIN_SNOOZE_MS = 10 * 60_000;
+/** After they 👍 a linger-offer: only check location this often. */
+const LONG_WATCH_MS = 20 * 60_000;
+/** Still parked away from home this long after 👍'ing a dwell check-in → linger offer. */
+const LINGER_AFTER_ACK_MS = 5 * 60_000;
 const STATIONARY_M = 25;
 const HOME_RADIUS_M = 50;
 const AWAY_FROM_HOME_M = 150;
@@ -83,7 +87,7 @@ export interface BrainDeps {
 }
 
 /** Why the open check-in was sent; decides confirm/escalation handling. */
-type CheckinKind = "general" | "offroute" | "noupdate";
+type CheckinKind = "general" | "offroute" | "noupdate" | "linger";
 
 interface UserRuntime {
   phase: WalkPhase;
@@ -111,6 +115,11 @@ interface UserRuntime {
   stationarySince: Date | null;
   /** First ping of the current possible stop. */
   stationaryAnchor: LocationPing | null;
+  /**
+   * They 👍'd a dwell check-in while still parked away from home.
+   * After LINGER_AFTER_ACK_MS of continued stillness we offer to back off.
+   */
+  stationaryAckedAt: Date | null;
   offRouteSince: Date | null;
   /** Cells seen during the current off-route stretch (saved on confirm). */
   offRouteCells: string[];
@@ -156,6 +165,7 @@ function emptyRuntime(): UserRuntime {
     suppressCheckinUntil: null,
     stationarySince: null,
     stationaryAnchor: null,
+    stationaryAckedAt: null,
     offRouteSince: null,
     offRouteCells: [],
     offRouteConfirmed: false,
@@ -405,14 +415,14 @@ function openCheckin(
 }
 
 /** User answered a check-in (👍 or an "ok" reply). */
-function resumeWalking(rt: UserRuntime, now: Date) {
+function resumeWalking(rt: UserRuntime, now: Date, snoozeMs = CHECKIN_SNOOZE_MS) {
   rt.phase = "WALKING";
   rt.checkinOpenedAt = null;
   rt.checkinKind = null;
   rt.nudged = false;
   rt.escalated = false;
   rt.contactAfterCall = null;
-  rt.suppressCheckinUntil = new Date(now.getTime() + CHECKIN_SNOOZE_MS);
+  rt.suppressCheckinUntil = new Date(now.getTime() + snoozeMs);
 }
 
 async function buildPlan(
@@ -481,6 +491,7 @@ async function beginWalk(
   rt.escalated = false;
   rt.stationarySince = null;
   rt.stationaryAnchor = null;
+  rt.stationaryAckedAt = null;
   rt.knownStopSince = null;
   rt.friendSince = null;
   rt.awayPings = 0;
@@ -552,6 +563,7 @@ async function endWalk(
   rt.offRouteCells = [];
   rt.offRouteConfirmed = false;
   rt.awayPings = 0;
+  rt.stationaryAckedAt = null;
   rt.contactAfterCall = null;
 }
 
@@ -799,7 +811,15 @@ export function createBrainEngine(deps: BrainDeps) {
       const since = now.getTime() - rt.checkinOpenedAt.getTime();
       const nudgeAt = timeouts.nudgeAfterSec * 1000;
       const escalateAt = nudgeAt + timeouts.escalateAfterSec * 1000;
-      if (!rt.nudged && since >= nudgeAt) {
+
+      // Linger offer: silence means "assume you're good" — wrap up, don't escalate.
+      if (rt.checkinKind === "linger") {
+        if (since >= escalateAt) {
+          send(rt, user.userId, "ended", templates.lingerDrop);
+          await endWalk(deps, rt, "ENDED_ELSEWHERE", now);
+          await logRule(deps, user.userId, "R5b", null, { step: "linger_drop" });
+        }
+      } else if (!rt.nudged && since >= nudgeAt) {
         const next = nextStepLine(noResponseAction(user), timeouts.escalateAfterSec, user.trustedContact?.name);
         send(rt, user.userId, "nudge", [copyFor(rt, "nudge"), next].filter(Boolean).join(" "));
         rt.nudged = true;
@@ -869,6 +889,22 @@ export function createBrainEngine(deps: BrainDeps) {
           dwellMin,
           thresholdMin,
         });
+      }
+
+      // Still parked away from home after they already 👍'd a dwell check-in → linger offer
+      if (
+        rt.phase === "WALKING" &&
+        rt.stationaryAckedAt &&
+        awayFromHome(user, rt.lastPing) &&
+        now.getTime() - rt.stationaryAckedAt.getTime() >= LINGER_AFTER_ACK_MS &&
+        canCheckin(rt, now)
+      ) {
+        openCheckin(rt, user.userId, now, "checkin", templates.lingerOffer, "linger");
+        await logRule(deps, user.userId, "R5b", rt.walkId, {
+          step: "linger_offer",
+          dwellMin,
+        });
+        brainLog(deps, "linger offer — still parked after dwell 👍");
       }
     }
 
@@ -941,6 +977,7 @@ export function createBrainEngine(deps: BrainDeps) {
     } else {
       rt.stationaryAnchor = ping;
       rt.stationarySince = null;
+      rt.stationaryAckedAt = null;
       rt.knownStopSince = null;
       rt.knownStopCell = null;
       rt.friendSince = null;
@@ -1171,6 +1208,18 @@ export function createBrainEngine(deps: BrainDeps) {
       if (isAffirmativeText(raw) && rt.phase === "CHECKING_IN") {
         brainLog(deps, "intent=ok (affirmative text) CHECKING_IN");
         if (rt.checkinKind === "offroute") await confirmOffRoute(rt, user, now);
+        if (rt.checkinKind === "linger") {
+          rt.stationaryAckedAt = null;
+          resumeWalking(rt, now, LONG_WATCH_MS);
+          brainLog(deps, "linger accept → long watch 20m");
+          await persistPhase(deps, rt);
+          await logRule(deps, user.userId, "R9a", rt.walkId, { lingerLongWatch: true });
+          return rt.pendingActions;
+        }
+        const wasDwell = rt.checkinKind === "general" || rt.checkinKind === null;
+        if (wasDwell && rt.stationarySince && awayFromHome(user, rt.lastPing)) {
+          rt.stationaryAckedAt = now;
+        }
         resumeWalking(rt, now);
         await persistPhase(deps, rt);
         await logRule(deps, user.userId, "R9a", rt.walkId, { via: "text" });
@@ -1247,6 +1296,12 @@ export function createBrainEngine(deps: BrainDeps) {
             /* ignore */
           }
         }
+        if (rt.checkinKind === "linger") {
+          rt.stationaryAckedAt = null;
+          resumeWalking(rt, now, LONG_WATCH_MS);
+          brainLog(deps, "linger accept (text) → long watch 20m");
+          return rt.pendingActions;
+        }
         if (rt.checkinKind === "offroute") {
           await confirmOffRoute(rt, user, now, parsed.placeLabel);
           resumeWalking(rt, now);
@@ -1256,6 +1311,13 @@ export function createBrainEngine(deps: BrainDeps) {
           await endWalk(deps, rt, "ENDED_ELSEWHERE", now);
           await logRule(deps, user.userId, "R15", null, { via: "reply" });
           return rt.pendingActions;
+        }
+        if (
+          (rt.checkinKind === "general" || rt.checkinKind === null) &&
+          rt.stationarySince &&
+          awayFromHome(user, rt.lastPing)
+        ) {
+          rt.stationaryAckedAt = now;
         }
         resumeWalking(rt, now);
         return rt.pendingActions;
@@ -1310,6 +1372,18 @@ export function createBrainEngine(deps: BrainDeps) {
         event.emoji === "👍"
       ) {
         if (rt.checkinKind === "offroute") await confirmOffRoute(rt, user, now);
+        if (rt.checkinKind === "linger") {
+          rt.stationaryAckedAt = null;
+          resumeWalking(rt, now, LONG_WATCH_MS);
+          brainLog(deps, "linger accept → long watch 20m");
+          await persistPhase(deps, rt);
+          await logRule(deps, user.userId, "R9a", rt.walkId, { lingerLongWatch: true });
+          return rt.pendingActions;
+        }
+        const wasDwell = rt.checkinKind === "general" || rt.checkinKind === null;
+        if (wasDwell && rt.stationarySince && awayFromHome(user, rt.lastPing)) {
+          rt.stationaryAckedAt = now;
+        }
         resumeWalking(rt, now);
         await persistPhase(deps, rt);
         await logRule(deps, user.userId, "R9a", rt.walkId);
