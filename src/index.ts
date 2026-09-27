@@ -2,10 +2,14 @@ import { SystemClock } from "./shared/clock.ts";
 import { createBrain } from "./brain/index.ts";
 import { createEchoBrain } from "./brain/stubEcho.ts";
 import { createLocations } from "./locations/index.ts";
+import { copy } from "./messenger/copy.ts";
 import { createInboundRouter } from "./messenger/onboarding.ts";
 import { createSpectrumMessenger, type Provider } from "./messenger/spectrum.ts";
+import { toE164 } from "./messenger/parse.ts";
 import { createUserStore } from "./store/index.ts";
-import type { Brain, Event, LocationPing } from "./shared/types.ts";
+import { voiceConfigFromEnv } from "./voice/index.ts";
+import { createLiveSim, SCENARIOS, type ScenarioName } from "./sim/live.ts";
+import { CALL_OUTCOMES, type Action, type Brain, type CallOutcome, type Event, type LocationPing } from "./shared/types.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const brainMode = (process.env.BRAIN_MODE ?? "live").toLowerCase();
@@ -23,7 +27,15 @@ if (brainMode === "echo") {
   const { createBrain: createStub } = await import("./brain/stubEmpty.ts");
   brain = createStub({ clock });
 } else {
-  brain = createBrain({ clock, verbose: process.env.BRAIN_LOG !== "0" });
+  if (!process.env.DATABASE_URL?.trim()) {
+    throw new Error("BRAIN_MODE=live needs DATABASE_URL (Tiger). Use BRAIN_MODE=echo to test without a database.");
+  }
+  // Same store as onboarding so the brain sees trustedContact / escalation / monitoringMode.
+  brain = createBrain({
+    clock,
+    getUser: (userId) => users.getById(userId),
+    verbose: process.env.BRAIN_LOG !== "0",
+  });
 }
 
 const messenger = await createSpectrumMessenger({
@@ -33,10 +45,10 @@ const messenger = await createSpectrumMessenger({
   projectSecret,
 });
 
-async function dispatch(event: Event): Promise<void> {
-  try {
-    const actions = await brain.handle(event);
-    for (const action of actions) {
+/** One failed action never drops the rest. A call that can't be placed counts as unresolved. */
+async function runActions(actions: Action[]): Promise<void> {
+  for (const action of actions) {
+    try {
       if (action.type === "SendText") {
         console.log(`[nook] → user ${action.userId} [${action.tag}] ${action.text}`);
       } else if (action.type === "AlertContact") {
@@ -47,21 +59,135 @@ async function dispatch(event: Event): Promise<void> {
         console.log(`[nook] → StartCall ${action.userId} walk=${action.walkId}`);
       }
       await messenger.execute(action);
+    } catch (err) {
+      console.error(`[nook] ${action.type} failed`, err);
+      if (action.type === "StartCall") {
+        await messenger.sendToUser(action.userId, copy.callFailed).catch(() => {});
+        await dispatch({
+          type: "CallEvent",
+          userId: action.userId,
+          walkId: action.walkId,
+          callType: "ended_unresolved",
+          time: clock.now(),
+        });
+      }
     }
+  }
+}
+
+async function dispatch(event: Event): Promise<void> {
+  let actions: Action[];
+  try {
+    actions = await brain.handle(event);
   } catch (err) {
     console.error(`[nook] failed handling ${event.type} for ${event.userId}`, err);
+    return;
   }
+  await runActions(actions);
 }
 
 let router: ReturnType<typeof createInboundRouter> | undefined;
 
-async function onPing(ping: LocationPing): Promise<void> {
+async function feedPing(ping: LocationPing): Promise<void> {
   console.log(
     `[locations] ${ping.userId} ${ping.lat.toFixed(5)},${ping.lon.toFixed(5)}`,
     ping.shortAddress ?? "",
   );
   await router?.onFix(ping.userId).catch((err) => console.error("[nook] onFix failed", err));
   await dispatch(ping);
+}
+
+const devSim = process.env.DEV_SIM === "1";
+const sim = createLiveSim({ now: () => clock.now(), feed: feedPing, dispatch });
+
+async function onPing(ping: LocationPing): Promise<void> {
+  if (sim.isActive(ping.userId)) return;
+  await feedPing(ping);
+}
+
+function isLoopback(address: string | undefined): boolean {
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+async function handleDevSim(req: Request, url: URL): Promise<Response> {
+  if (req.method === "GET") return Response.json({ ok: true, running: sim.status() });
+  if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+  const body = (await req.json().catch(() => ({}))) as {
+    handle?: string;
+    scenario?: string;
+    walk?: boolean;
+  };
+  const handle = body.handle ? toE164(body.handle) ?? body.handle : undefined;
+  if (!handle) return Response.json({ ok: false, error: "handle required" }, { status: 400 });
+  const user = await users.getByHandle(handle);
+  if (!user) return Response.json({ ok: false, error: `no user for ${handle}` }, { status: 404 });
+
+  if (url.pathname === "/dev/sim/stop") {
+    const stopped = sim.stop(user.userId);
+    // Synthetic positions must not linger (e.g. "away from home") once real pings resume.
+    await brain.resetUser?.(user.userId);
+    return Response.json({ ok: true, userId: user.userId, stopped, reset: Boolean(brain.resetUser) });
+  }
+
+  const scenario = body.scenario as ScenarioName | undefined;
+  if (!scenario || !SCENARIOS.includes(scenario)) {
+    return Response.json(
+      { ok: false, error: `scenario must be one of: ${SCENARIOS.join(", ")}` },
+      { status: 400 },
+    );
+  }
+  if (user.homeLat == null || user.homeLon == null) {
+    return Response.json({ ok: false, error: "user has no home saved (text HOME first)" }, { status: 400 });
+  }
+  sim.stop(user.userId);
+  await brain.resetUser?.(user.userId);
+  const started = sim.start(
+    user.userId,
+    { lat: user.homeLat, lon: user.homeLon },
+    scenario,
+    body.walk === undefined ? {} : { startWalk: body.walk },
+  );
+  return Response.json({ ok: true, userId: user.userId, ...started });
+}
+
+/**
+ * ElevenLabs agent webhook tools. Parameters may arrive flat or under
+ * `parameters`; `user_id` / `walk_id` come from the call's dynamic variables.
+ */
+async function handleTool(req: Request, url: URL): Promise<Response> {
+  const secret = process.env.TOOLS_SECRET?.trim();
+  if (!secret || req.headers.get("x-tools-secret") !== secret) {
+    return new Response("unauthorized", { status: 401 });
+  }
+  if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+  const raw = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const params = (typeof raw.parameters === "object" && raw.parameters ? raw.parameters : raw) as Record<
+    string,
+    unknown
+  >;
+  const walkId = typeof params.walk_id === "string" ? params.walk_id : undefined;
+  const userId = typeof params.user_id === "string" ? params.user_id : undefined;
+  if (!walkId) return Response.json({ ok: false, error: "walk_id required" }, { status: 400 });
+
+  if (url.pathname === "/tools/location") {
+    const ctx = await brain.getLiveContext(walkId);
+    return ctx ? Response.json(ctx) : Response.json({ ok: false, error: "no live location" }, { status: 404 });
+  }
+
+  if (url.pathname === "/tools/call-outcome") {
+    const outcome = params.outcome as CallOutcome | undefined;
+    if (!outcome || !CALL_OUTCOMES.includes(outcome)) {
+      return Response.json({ ok: false, error: `outcome must be one of: ${CALL_OUTCOMES.join(", ")}` }, { status: 400 });
+    }
+    if (!userId || !(await users.getById(userId))) {
+      return Response.json({ ok: false, error: "unknown user_id" }, { status: 404 });
+    }
+    console.log(`[voice] ${userId} walk ${walkId}: ${outcome}`);
+    await dispatch({ type: "CallEvent", userId, walkId, callType: outcome, time: clock.now() });
+    return Response.json({ ok: true });
+  }
+
+  return new Response("not found", { status: 404 });
 }
 
 const locations = await createLocations({
@@ -76,14 +202,35 @@ const locations = await createLocations({
 router = createInboundRouter({ messenger, locations, users, clock, dispatch });
 const { route } = router;
 
+const TICK_MS = 30_000;
+let ticking = false;
+const ticker = setInterval(async () => {
+  if (!brain.tick || ticking) return;
+  ticking = true;
+  try {
+    await runActions(await brain.tick(clock.now()));
+  } catch (err) {
+    console.error("[nook] tick failed", err);
+  } finally {
+    ticking = false;
+  }
+}, TICK_MS);
+
 console.log(
-  `[nook] ready  PROVIDER=${provider}  BRAIN_MODE=${brainMode}  PORT=${port}  DB=${process.env.DATABASE_URL ? "yes" : "no"}  GEMINI=${process.env.USE_GEMINI === "0" || !process.env.GEMINI_API_KEY ? "off" : "on"}`,
+  `[nook] ready  PROVIDER=${provider}  BRAIN_MODE=${brainMode}  PORT=${port}  DB=${process.env.DATABASE_URL ? "yes" : "no"}  GEMINI=${process.env.USE_GEMINI === "0" || !process.env.GEMINI_API_KEY ? "off" : "on"}  CALLS=${voiceConfigFromEnv() ? "on" : "off"}  DEV_SIM=${devSim ? "on" : "off"}`,
 );
 
 const server = Bun.serve({
   port,
-  fetch(req) {
+  fetch(req, srv) {
     const url = new URL(req.url);
+    if (devSim && url.pathname.startsWith("/dev/sim")) {
+      if (!isLoopback(srv.requestIP(req)?.address)) {
+        return new Response("forbidden", { status: 403 });
+      }
+      return handleDevSim(req, url);
+    }
+    if (url.pathname.startsWith("/tools/")) return handleTool(req, url);
     if (url.pathname === "/health") {
       return Response.json({
         ok: true,
@@ -100,6 +247,7 @@ const server = Bun.serve({
 console.log(`[nook] HTTP listening on http://localhost:${server.port}`);
 
 async function shutdown() {
+  clearInterval(ticker);
   await locations.stop();
   await messenger.stop();
   server.stop();

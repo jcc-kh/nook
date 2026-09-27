@@ -1,10 +1,12 @@
-import { Spectrum, type Space } from "spectrum-ts";
+import { reply, Spectrum, type Content, type Message, type Space } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
 import { terminal } from "spectrum-ts/providers/terminal";
 import { templateForTag } from "../shared/templates.ts";
 import type { Action, ExecuteResult, SendTextTag } from "../shared/types.ts";
 import type { UserRecord, UserStore } from "../store/index.ts";
+import { placeCall, voiceConfigFromEnv } from "../voice/index.ts";
 import type { Messenger } from "./index.ts";
+import { copy } from "./copy.ts";
 
 export type Provider = "terminal" | "imessage";
 
@@ -16,7 +18,8 @@ interface InboundBase {
 }
 
 export type Inbound =
-  | (InboundBase & { kind: "text"; messageId: string; text: string })
+  /** `threadTargetId`: set when the user replied inside a thread (to that message). */
+  | (InboundBase & { kind: "text"; messageId: string; text: string; threadTargetId?: string })
   | (InboundBase & { kind: "reaction"; emoji: string; targetMessageId: string });
 
 export interface SpectrumMessenger extends Messenger {
@@ -40,6 +43,32 @@ function mapsLink(lat: number, lon: number): string {
   return `https://maps.apple.com/?ll=${lat.toFixed(5)},${lon.toFixed(5)}`;
 }
 
+/**
+ * Plain text of a message, looking inside in-thread replies and text+attachment
+ * groups. A shared contact card becomes "Name +number" so it parses like a typed contact.
+ */
+function textOf(content: Content): string | undefined {
+  switch (content.type) {
+    case "text":
+      return content.text;
+    case "reply":
+      return textOf(content.content as Content);
+    case "contact": {
+      const phones = content.phones ?? [];
+      const phone = (phones.find((p) => p.type === "mobile") ?? phones[0])?.value;
+      const n = content.name;
+      const name = n?.formatted ?? [n?.first, n?.last].filter(Boolean).join(" ");
+      return [name, phone].filter(Boolean).join(" ") || undefined;
+    }
+    case "group": {
+      const parts = content.items.map((m) => textOf(m.content)).filter((t): t is string => !!t);
+      return parts.length ? parts.join("\n") : undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
 export async function createSpectrumMessenger(
   opts: SpectrumMessengerOptions,
 ): Promise<SpectrumMessenger> {
@@ -58,8 +87,11 @@ export async function createSpectrumMessenger(
   }
   const app = imApp ?? termApp!;
 
+  const voice = voiceConfigFromEnv();
   const spaces = new Map<string, Space>();
   const lastIdByTag = new Map<string, Map<SendTextTag, string>>();
+  /** The user's in-thread message currently being handled; our replies go into that thread. */
+  const threads = new Map<string, Message>();
 
   async function openDm(handle: string): Promise<Space | undefined> {
     if (!imApp) return undefined;
@@ -83,6 +115,15 @@ export async function createSpectrumMessenger(
       console.warn(`[messenger] no space for ${userId}; dropping: ${text}`);
       return {};
     }
+    const thread = threads.get(userId);
+    if (thread) {
+      try {
+        const sent = await space.send(reply(text, thread));
+        if (sent) return { messageId: sent.id };
+      } catch (err) {
+        console.warn(`[messenger] threaded reply to ${userId} failed; sending in the main chat`, err);
+      }
+    }
     const sent = await space.send(text);
     return sent ? { messageId: sent.id } : {};
   }
@@ -95,13 +136,23 @@ export async function createSpectrumMessenger(
       console.warn(`[messenger] AlertContact for ${userId} but no trusted contact on file:\n${body}`);
       return;
     }
-    const space = await openDm(contact.phone);
-    if (!space) {
-      // Terminal has no second person to text; surface it in the log instead.
-      console.log(`[messenger] → trusted contact ${contact.name ?? ""} ${contact.phone}:\n${body}`);
-      return;
+    try {
+      const space = await openDm(contact.phone);
+      if (!space) {
+        // Terminal has no second person to text; surface it in the log instead.
+        console.log(`[messenger] → trusted contact ${contact.name ?? ""} ${contact.phone}:\n${body}`);
+        return;
+      }
+      await space.send(body);
+      console.log(`[messenger] alerted trusted contact ${contact.name ?? ""} ${contact.phone}`);
+      await sendToUser(userId, copy.contactAlerted(contact.name)).catch(() => {});
+    } catch (err) {
+      // e.g. Photon "Target not allowed for this project": the user must not assume someone was told.
+      console.error(
+        `[messenger] could NOT alert trusted contact ${contact.phone}: ${err instanceof Error ? err.message : err}`,
+      );
+      await sendToUser(userId, copy.contactUnreachable(contact.name)).catch(() => {});
     }
-    await space.send(body);
   }
 
   async function execute(action: Action): Promise<ExecuteResult> {
@@ -118,9 +169,14 @@ export async function createSpectrumMessenger(
       case "AlertContact":
         await alertContact(action.userId, action.text, action.lat, action.lon);
         return {};
-      case "StartCall":
-        console.warn("[messenger] StartCall not wired yet (L4):", action.vars);
+      case "StartCall": {
+        const user = await users.getById(action.userId);
+        if (!user) throw new Error(`StartCall for unknown user ${action.userId}`);
+        if (!voice) throw new Error("calls not configured (ELEVENLABS_API_KEY / _AGENT_ID / _AGENT_PHONE_NUMBER_ID)");
+        const conversationId = await placeCall(voice, user.handle, action);
+        console.log(`[messenger] calling ${user.handle} (walk ${action.walkId}, conversation ${conversationId ?? "?"})`);
         return {};
+      }
     }
   }
 
@@ -136,10 +192,26 @@ export async function createSpectrumMessenger(
 
       const base: InboundBase = { user, isNewUser: !existing, chatId: space.id };
       const content = message.content;
-      if (content.type === "text") {
-        yield { ...base, kind: "text", messageId: message.id, text: content.text };
-      } else if (content.type === "reaction") {
+      if (content.type === "reaction") {
         yield { ...base, kind: "reaction", emoji: content.emoji, targetMessageId: content.target.id };
+        continue;
+      }
+      const text = textOf(content);
+      if (text === undefined) {
+        console.log(`[messenger] ignoring ${content.type} message from ${user.userId}`);
+        continue;
+      }
+      if (content.type !== "reply") {
+        yield { ...base, kind: "text", messageId: message.id, text };
+        continue;
+      }
+      // The consumer handles each message before pulling the next, so the
+      // thread stays set exactly while this message's replies are sent.
+      threads.set(user.userId, message);
+      try {
+        yield { ...base, kind: "text", messageId: message.id, text, threadTargetId: content.target.id };
+      } finally {
+        threads.delete(user.userId);
       }
     }
   }

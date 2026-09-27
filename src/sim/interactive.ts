@@ -56,15 +56,14 @@ const COMMANDS = new Set([
 const clock = new SimClock(new Date("2026-04-14T02:30:00.000Z"));
 let msgSeq = 0;
 let lastOutboundId: string | null = null;
-let lastLat = DEMO_ORIGIN.lat;
-let lastLon = DEMO_ORIGIN.lon;
+let lastLat: number = DEMO_ORIGIN.lat;
+let lastLon: number = DEMO_ORIGIN.lon;
 
 const llm = createLlm();
 const getUser = async () => ({
   userId: DEMO.userId,
   handle: DEMO.handle,
   contact: DEMO.contact,
-  codeword: DEMO.codeword,
   homeLat: DEMO.homeLat,
   homeLon: DEMO.homeLon,
   nightStart: DEMO.nightStart,
@@ -412,7 +411,8 @@ function parseDuration(tok: string): number | null {
     return n * 60_000; // bare number = minutes
   }
   const n = Number(m[1]);
-  switch (m[2].toLowerCase()) {
+  const unit = (m[2] ?? "m").toLowerCase();
+  switch (unit) {
     case "ms":
       return n;
     case "s":

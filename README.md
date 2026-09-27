@@ -25,10 +25,12 @@ bun run start          # GET /health — BRAIN_MODE=stub|echo|live
 bun run sim:l1   # R1 R2 R2x R3 R4 R14
 bun run sim:l2   # R5b R7 R8 R9a R10 R16
 bun run sim:l3   # R5a R6 R9b R15 (+ baselines)
-bun run sim:l4   # R11 R13 getLiveContext resume
+bun run sim:l4   # R11 call outcomes getLiveContext resume
 bun run sim:reachout   # logged reach-out with/without Gemini
 bun run sim:play       # interactive REPL (you type; brain replies)
 bun run sim:personal   # usual route / off-route / late / known stops (needs seed:history)
+bun run sim:live       # live GPS / Photon sim harness
+bun run events:tail    # tail Tiger events
 ```
 
 `BRAIN_MODE=live` wires the real rules brain (needs `DATABASE_URL`).  

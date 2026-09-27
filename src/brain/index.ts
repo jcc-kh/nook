@@ -38,6 +38,8 @@ export function createBrain(opts: CreateBrainOptions): Brain & {
 
   return {
     handle: engine.handle,
+    tick: engine.tick,
+    resetUser: engine.resetUser,
     getLiveContext: engine.getLiveContext,
     getPhase: engine.getPhase,
     getRuntime: engine.getRuntime,

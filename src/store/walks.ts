@@ -231,16 +231,54 @@ export async function loadRouteCells(
   return cells.rows.map((c) => c.cell);
 }
 
-/** All distinct cells from this user's ended walks (usual area for unfamiliar-route notice). */
-export async function loadFamiliarCells(userId: string): Promise<string[]> {
-  const res = await query<{ cell: string }>(
-    `SELECT DISTINCT lp.cell
-     FROM location_pings lp
-     JOIN walks w ON w.walk_id = lp.walk_id
-     WHERE lp.user_id = $1 AND w.ended_at IS NOT NULL`,
+/**
+ * Cells the user normally passes through: every ping cell from past walks that
+ * ended at home (ARRIVED), plus cells they confirmed after an off-route check-in.
+ * Walks that ended elsewhere or escalated don't define the usual route.
+ */
+export async function loadUsualCells(userId: string): Promise<{
+  walkCount: number;
+  confirmedCount: number;
+  cells: string[];
+}> {
+  const counts = await query<{ walks: string; confirmed: string }>(
+    `SELECT
+       (SELECT count(*) FROM walks WHERE user_id = $1 AND status = 'ARRIVED')::text AS walks,
+       (SELECT count(*) FROM confirmed_cells WHERE user_id = $1)::text AS confirmed`,
     [userId],
   );
-  return res.rows.map((r) => r.cell);
+  const cells = await query<{ cell: string }>(
+    `SELECT DISTINCT p.cell
+       FROM location_pings p
+       JOIN walks w ON w.walk_id = p.walk_id
+      WHERE p.user_id = $1 AND w.user_id = $1 AND w.status = 'ARRIVED'
+     UNION
+     SELECT cell FROM confirmed_cells WHERE user_id = $1`,
+    [userId],
+  );
+  return {
+    walkCount: Number(counts.rows[0]?.walks ?? 0),
+    confirmedCount: Number(counts.rows[0]?.confirmed ?? 0),
+    cells: cells.rows.map((c) => c.cell),
+  };
+}
+
+export async function insertConfirmedCells(userId: string, cells: string[]): Promise<void> {
+  if (cells.length === 0) return;
+  await query(
+    `INSERT INTO confirmed_cells (user_id, cell)
+     SELECT $1, unnest($2::text[])
+     ON CONFLICT (user_id, cell) DO NOTHING`,
+    [userId, cells],
+  );
+}
+
+/** Users with a walk still open in Tiger (used to resume timers after a restart). */
+export async function listOpenWalkUserIds(): Promise<string[]> {
+  const res = await query<{ user_id: string }>(
+    `SELECT DISTINCT user_id FROM walks WHERE ended_at IS NULL`,
+  );
+  return res.rows.map((r) => r.user_id);
 }
 
 export function buildDefaultPlan(

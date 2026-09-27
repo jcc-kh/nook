@@ -422,7 +422,6 @@ async function main() {
     userId: DEMO.userId,
     handle: DEMO.handle,
     contact: DEMO.contact,
-    codeword: DEMO.codeword,
     homeLat: DEMO.homeLat,
     homeLon: DEMO.homeLon,
     nightStart: DEMO.nightStart,

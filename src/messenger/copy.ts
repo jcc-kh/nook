@@ -1,9 +1,10 @@
-import type {
-  EmergencyAction,
-  LearnedRoutine,
-  MonitoringMode,
-  NoResponseAction,
-  TrustedContact,
+import {
+  resolveTimeouts,
+  type CheckinTimeouts,
+  type LearnedRoutine,
+  type MonitoringMode,
+  type NoResponseAction,
+  type TrustedContact,
 } from "../shared/settings.ts";
 import type { UserRecord } from "../store/index.ts";
 
@@ -24,7 +25,6 @@ export const escalationOptions: NoResponseAction[] = [
   "CALL_THEN_CONTACT",
   "NONE",
 ];
-export const emergencyOptions: EmergencyAction[] = ["CALL_USER", "CONTACT_TRUSTED", "CALL_THEN_CONTACT"];
 
 const monitoringLabel: Record<MonitoringMode, string> = {
   MANUAL: "only when you start a trip",
@@ -60,18 +60,6 @@ function escalationPlan(action: NoResponseAction, c?: TrustedContact): string {
   }
 }
 
-/** Nook's voice: what the emergency word does. */
-export function emergencyConsequence(action: EmergencyAction, c?: TrustedContact): string {
-  switch (action) {
-    case "CALL_USER":
-      return "I'll call you immediately";
-    case "CONTACT_TRUSTED":
-      return `I'll contact ${yours(c)} immediately`;
-    case "CALL_THEN_CONTACT":
-      return `I'll call you immediately, then contact ${yours(c)} if you don't respond`;
-  }
-}
-
 export function learnedSummary(r: LearnedRoutine): string {
   const lines = [
     r.frequentPlaces.length ? `Places you visit often: ${r.frequentPlaces.join(", ")}` : "",
@@ -86,17 +74,48 @@ function contactLabel(c: TrustedContact): string {
   return c.name ?? `the number ending in ${c.phone.slice(-4)}`;
 }
 
-export const copy = {
-  intro:
-    "Hi, I'm Nook 🌙 I keep an eye on your trips and check in if something seems unusual. If I can't confirm you're okay, I can call you or reach someone you trust.",
-  locationConnected: "Location sharing is connected ✓",
-  locationRequest: "First, share your location with me using the card below.",
-  locationTerminal: "(terminal) Fake a location with /loc <lat> <lon>",
+/** "22:00" → "10pm", "06:30" → "6:30am". */
+function clockLabel(hhmm: string): string {
+  const [h = 0, m = 0] = hhmm.split(":").map(Number);
+  const suffix = h < 12 ? "am" : "pm";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return m ? `${h12}:${String(m).padStart(2, "0")}${suffix}` : `${h12}${suffix}`;
+}
 
-  askContact: "Who should I contact if something seems wrong? Send me their name and phone number.",
+/** Nook's voice: when it will watch without being asked. */
+function monitoringPlan(user: UserRecord): string {
+  switch (user.monitoringMode) {
+    case "MANUAL":
+      return "I'll only watch when you ask. Text 'walk me home' or 'heading out' when you leave.";
+    case "AWAY_FROM_HOME":
+      return "I'll keep an eye on things whenever you're away from home. You can also text 'walk me home' anytime.";
+    case "EVENINGS":
+    default:
+      return `I'll keep an eye on your trips in the evenings (${clockLabel(user.nightStart ?? "22:00")}–${clockLabel(user.nightEnd ?? "06:00")}). You can also text 'walk me home' anytime.`;
+  }
+}
+
+function timingSummary(t: Required<CheckinTimeouts>): string {
+  return `nudge after ${t.nudgeAfterSec}s, next step ${t.escalateAfterSec}s after that, check in if your location stops for ${t.noUpdateMin} min`;
+}
+
+export const copy = {
+  askContact: "Who should I contact if something seems wrong? Send me their name and phone number (or share their contact card).",
+  /** First message to a new user: who Nook is, then the first question. */
+  welcome:
+    "Hi, I'm Nook 🌙 I keep an eye on your trips and check in if something seems unusual. If I can't confirm you're okay, I can call you or reach someone you trust.\n\nFirst, what's your name?",
+  askUserName: "What's your name? I'll use it when I check in, and so your trusted contact knows who I'm texting about.",
+  badUserName: "Just your first name is fine, like 'Alex'.",
+  userNameSaved: (name: string) => `Nice to meet you, ${name}.`,
+  confirmUserName: (name: string) => `Change your name to ${name}? Reply yes to confirm.`,
+  askContactName: "Got the number. What's their name?",
+  askContactPhone: (name: string) => `What's ${name}'s phone number?`,
+  badContactName: "Just their first name is fine, like 'Sam' or 'Mom'.",
+  badContact:
+    "That doesn't look like a valid phone number. Send it with the area code, like: Sam 646 555 1234 (or +44… for other countries).",
+  contactIsSelf: "That's your own number. Send the number of someone you trust.",
   contactSaved: (c: TrustedContact) =>
-    c.name ? `Got it — ${c.name} is your trusted contact.` : "Got it — your trusted contact is saved.",
-  badContact: "I couldn't read a phone number there. Try something like: Alex +1 646 123 4567",
+    c.name ? `Got it, ${c.name} is your trusted contact.` : "Got it, your trusted contact is saved.",
 
   askMonitoring:
     "When should I keep an eye on your location?\n1. Only when I tell Nook I'm heading somewhere\n2. During evenings / nighttime\n3. Whenever I'm away from home",
@@ -104,22 +123,46 @@ export const copy = {
   askEscalation: (c?: TrustedContact) =>
     `If something seems unusual, I'll check in with you by text first.\n\nIf you don't respond, what should I do next?\n1. Call me\n2. Contact ${theirs(c)}\n3. Call me, then contact ${theirs(c)} if I still don't respond\n4. Don't escalate further`,
 
-  offerCode:
-    "Want a discreet emergency word? If you send or say it, I'll skip the normal check-in and immediately take the action you choose.\n\nReply yes or no.",
-  askCodePhrase: "What should it be? Pick a word you wouldn't normally text, like tiramisu.",
-  badCodePhrase: "Pick a word or short phrase (letters only) that you wouldn't normally text.",
-  askCodeAction: (phrase: string, c?: TrustedContact) =>
-    `If you send or say '${phrase}', what should I do?\n1. Call me immediately\n2. Contact ${theirs(c)} immediately\n3. Call me, then contact ${theirs(c)} if I don't respond`,
-  codeSet: (phrase: string, action: EmergencyAction, c?: TrustedContact) =>
-    `'${phrase}' is set. If you send or say it, ${emergencyConsequence(action, c)}.`,
+  locationRequest:
+    "Next, share your location with me using the card below (choose Share Indefinitely). Or reply 'skip' to do it later.",
+  locationTerminal: "(terminal) Share a location with /loc <lat> <lon>, or reply 'skip'.",
+  locationWaiting:
+    "I don't see your location yet. Tap the card above and choose Share Indefinitely, or reply 'skip' to do it later.",
+  locationConnected: "Location sharing is connected ✓",
+  locationSkipped: "No problem. I can't watch your trips until you share your location with me.",
 
-  done: "You're all set 🌙\nI'll keep an eye on your trips based on the settings you chose and check in if something looks unusual.\n\nYou can text 'settings' anytime to change when I monitor, who I contact, how I escalate, or your emergency word.",
+  askHome: "Are you at home right now? Reply yes and I'll remember this spot as home, or no.",
+  homeLater: "Okay. Text 'home' the next time you're there.",
+
+  /** Recap of what the user chose, in terms of what Nook will actually do. */
+  done(user: UserRecord): string {
+    const lines = ["You're all set 🌙", monitoringPlan(user)];
+    if (user.escalation) {
+      lines.push(
+        `If something looks unusual I'll text you first. If you don't answer, ${escalationPlan(user.escalation.onNoTextResponse, user.trustedContact)}.`,
+      );
+    }
+    if (user.homeLat === undefined) {
+      lines.push(
+        "One more thing: text 'home' next time you're there, so I know where home is and can tell when you've made it back.",
+      );
+    }
+    lines.push(
+      "Text 'settings' anytime to change when I monitor, who I contact, how I escalate, or your check-in timing.",
+    );
+    return lines.join("\n\n");
+  },
 
   pickNumber: (n: number) => `Reply with a number from 1 to ${n}.`,
   yesOrNo: "Reply yes or no.",
 
   learnedNothing:
     "I haven't learned enough about your routine yet. As you use Nook, I'll gradually pick up patterns like places you visit often and routes you commonly take.",
+
+  callFailed: "I tried to call you but couldn't place the call. Tap 👍 if you're okay, or text me.",
+  contactAlerted: (name?: string) => `I've let ${name ?? "your trusted contact"} know and sent them your location.`,
+  contactUnreachable: (name?: string) =>
+    `I tried to reach ${name ?? "your trusted contact"} but my message didn't go through. If you need help, contact someone directly. Tap 👍 if you're okay.`,
 
   homeSaved: "Home saved.",
   homeNoFix:
@@ -141,33 +184,38 @@ export const copy = {
     `Make ${contactLabel(c)} your trusted contact? Reply yes to confirm.`,
   confirmEscalation: (action: NoResponseAction, c?: TrustedContact) =>
     `If you miss a check-in, ${escalationPlan(action, c)}. Save this? Reply yes to confirm.`,
-  confirmCode: (phrase: string, action: EmergencyAction, c?: TrustedContact) =>
-    `Set your emergency word to '${phrase}'? If you send or say it, ${emergencyConsequence(action, c)}. Reply yes to confirm.`,
-  confirmCodeRemoval: "Turn off your emergency word? Reply yes to confirm.",
-  confirmYesNo: "Reply yes to confirm, or no to keep things as they are.",
-  changeSaved: "Done — your settings are updated.",
-  codeRemoved: "Done — your emergency word is off.",
+
+  askNudgeAfter: (current: number) =>
+    `If you don't answer a check-in, how many seconds should I wait before nudging you? (30–600, now ${current}s. Say 'same' to keep it.)`,
+  askEscalateAfter: (current: number) =>
+    `After the nudge, how many seconds before I take the next step? (30–600, now ${current}s. Say 'same' to keep it.)`,
+  askNoUpdate: (current: number) =>
+    `If your location stops updating while I'm watching, how many minutes before I check in? (2–15, now ${current} min. Say 'same' to keep it.)`,
+  badTiming: (min: number, max: number, unit: string) => `Send a number from ${min} to ${max} ${unit}.`,
+  confirmTimeouts: (t: Required<CheckinTimeouts>) =>
+    `Save these timings? ${timingSummary(t)}. Reply yes to confirm.`,
+  changeSaved: "Done, your settings are updated.",
   changeCancelled: "Okay, I didn't change anything.",
-  noCodeToRemove: "You don't have an emergency word set.",
-  finishSetupFirst: "Let's finish setup first.",
 
   settings(user: UserRecord): string {
     const c = user.trustedContact;
     const lines = [
       "Nook settings",
+      `Name: ${user.displayName ?? "not set"}`,
       `Monitoring: ${user.monitoringMode ? monitoringLabel[user.monitoringMode] : "not set"}`,
       `Trusted contact: ${c ? contactLabel(c) : "not set"}`,
       `If something seems unusual: ${
         user.escalation ? escalationSummary(user.escalation.onNoTextResponse, c) : "not set"
       }`,
-      `Emergency word: ${user.emergencyCode ? "configured" : "not set"}`,
+      `Check-in timing: ${timingSummary(resolveTimeouts(user.timeouts))}`,
       `Home: ${user.homeLat !== undefined ? "saved" : "not saved yet (text 'home' when you're there)"}`,
       "",
       "You can say things like:",
+      "- 'change my name'",
       "- 'only monitor when I start a trip'",
       "- 'change my trusted contact'",
       "- 'don't contact anyone if I miss a check-in'",
-      "- 'change my emergency word'",
+      "- 'change my check-in timing'",
       "- 'what have you learned about me?'",
     ];
     return lines.join("\n");

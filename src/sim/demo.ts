@@ -3,7 +3,6 @@ export const DEMO = {
   userId: "demo-alex",
   handle: "+15555550199",
   contact: "+15555550100",
-  codeword: "orchid",
   // Near Columbia / Morningside (home)
   homeLat: 40.8075,
   homeLon: -73.9626,

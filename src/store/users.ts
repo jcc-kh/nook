@@ -1,5 +1,6 @@
 import { toCell } from "../shared/cell.ts";
 import type { LocationPing, RuleId } from "../shared/types.ts";
+import type { CheckinTimeouts, MonitoringMode, NoResponseAction } from "../shared/settings.ts";
 import { query } from "./db.ts";
 import type { UserPatch, UserRecord, UserStore } from "./types.ts";
 
@@ -15,9 +16,21 @@ type UserRow = {
   night_end: string;
   tz: string;
   display_name: string | null;
+  trusted_name: string | null;
+  monitoring_mode: string | null;
+  escalation_on_no_response: string | null;
+  nudge_after_sec: number | null;
+  escalate_after_sec: number | null;
+  no_update_min: number | null;
+  onboarded_at: Date | null;
 };
 
 function rowToUser(r: UserRow): UserRecord {
+  const timeouts: CheckinTimeouts = {
+    ...(r.nudge_after_sec != null ? { nudgeAfterSec: r.nudge_after_sec } : {}),
+    ...(r.escalate_after_sec != null ? { escalateAfterSec: r.escalate_after_sec } : {}),
+    ...(r.no_update_min != null ? { noUpdateMin: r.no_update_min } : {}),
+  };
   return {
     userId: r.user_id,
     handle: r.handle,
@@ -28,17 +41,54 @@ function rowToUser(r: UserRow): UserRecord {
     nightEnd: String(r.night_end).slice(0, 5),
     tz: r.tz,
     displayName: r.display_name ?? undefined,
+    onboardedAt: r.onboarded_at ? new Date(r.onboarded_at) : undefined,
+    trustedContact: r.contact
+      ? { phone: r.contact, ...(r.trusted_name ? { name: r.trusted_name } : {}) }
+      : undefined,
+    monitoringMode: (r.monitoring_mode as MonitoringMode | null) ?? undefined,
+    escalation: r.escalation_on_no_response
+      ? {
+          initialAction: "TEXT_USER",
+          onNoTextResponse: r.escalation_on_no_response as NoResponseAction,
+        }
+      : undefined,
+    timeouts: Object.keys(timeouts).length ? timeouts : undefined,
   };
 }
 
-/** Live Tiger `users` has no codeword column; phrase lives in the settings overlay. */
 const USER_SELECT = `
   SELECT user_id, handle, contact,
     ST_Y(home::geometry) AS home_lat,
     ST_X(home::geometry) AS home_lon,
-    night_start::text, night_end::text, tz, display_name
+    night_start::text, night_end::text, tz, display_name,
+    trusted_name, monitoring_mode, escalation_on_no_response,
+    nudge_after_sec, escalate_after_sec, no_update_min, onboarded_at
   FROM users
 `;
+
+/** Column values for the keys present in `patch` (present-but-undefined clears). */
+function patchColumns(patch: UserPatch): Record<string, unknown> {
+  const has = (k: keyof UserPatch) => Object.prototype.hasOwnProperty.call(patch, k);
+  const cols: Record<string, unknown> = {};
+  if (has("displayName")) cols.display_name = patch.displayName ?? null;
+  if (has("trustedContact")) {
+    cols.contact = patch.trustedContact?.phone ?? null;
+    cols.trusted_name = patch.trustedContact?.name ?? null;
+  }
+  if (has("monitoringMode")) cols.monitoring_mode = patch.monitoringMode ?? null;
+  if (has("escalation")) {
+    cols.escalation_on_no_response = patch.escalation?.onNoTextResponse ?? null;
+  }
+  if (has("timeouts")) {
+    cols.nudge_after_sec = patch.timeouts?.nudgeAfterSec ?? null;
+    cols.escalate_after_sec = patch.timeouts?.escalateAfterSec ?? null;
+    cols.no_update_min = patch.timeouts?.noUpdateMin ?? null;
+  }
+  if (has("onboardedAt")) cols.onboarded_at = patch.onboardedAt?.toISOString() ?? null;
+  // Raw column, when given explicitly, wins over trustedContact above.
+  if (has("contact")) cols.contact = patch.contact ?? null;
+  return cols;
+}
 
 export function createTigerUserStore(): UserStore {
   return {
@@ -61,18 +111,13 @@ export function createTigerUserStore(): UserStore {
     },
 
     async updateUser(userId: string, patch: UserPatch): Promise<void> {
-      const contact = patch.trustedContact?.phone ?? patch.contact;
-      const displayName = patch.displayName;
-      if (contact === undefined && displayName === undefined) {
-        return;
-      }
-      const res = await query(
-        `UPDATE users SET
-           contact = COALESCE($2, contact),
-           display_name = COALESCE($3, display_name)
-         WHERE user_id = $1`,
-        [userId, contact ?? null, displayName ?? null],
-      );
+      const cols = Object.entries(patchColumns(patch));
+      if (cols.length === 0) return;
+      const sets = cols.map(([col], i) => `${col} = $${i + 2}`).join(", ");
+      const res = await query(`UPDATE users SET ${sets} WHERE user_id = $1`, [
+        userId,
+        ...cols.map(([, v]) => v),
+      ]);
       if (res.rowCount === 0) throw new Error(`unknown user ${userId}`);
     },
 
@@ -82,10 +127,6 @@ export function createTigerUserStore(): UserStore {
         contactE164,
       ]);
       if (res.rowCount === 0) throw new Error(`unknown user ${userId}`);
-    },
-
-    async setCodeword(_userId: string, _codeword: string): Promise<void> {
-      // No Tiger column; wrapTigerWithSettings keeps the phrase in-process.
     },
 
     async setHome(userId: string, lat: number, lon: number): Promise<void> {
@@ -118,7 +159,6 @@ export async function upsertDemoUser(user: {
   userId: string;
   handle: string;
   contact: string;
-  codeword?: string;
   homeLat: number;
   homeLon: number;
   nightStart?: string;

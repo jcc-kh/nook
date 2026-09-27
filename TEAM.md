@@ -16,7 +16,7 @@ Keep Claude’s edge-vs-brain split. Adjust these details so nobody blocks or do
 | Topic | Decision |
 | --- | --- |
 | Hour 0 | **Both** write `types.ts`, `clock.ts`, `templates.ts` together before splitting. Do not invent parallel event shapes. |
-| Codeword | **A** owns the ElevenLabs tool HTTP that detects codeword and emits `CallEvent` (`silent_alert`). **B** owns rule **R13** (alert contact, stay on call). A does not invent alert copy. |
+| Call outcomes | **A** owns the ElevenLabs tool HTTP that reports `CallEvent` outcomes (`/tools/call-outcome`). **B** owns what each outcome does (R10 / R11). A does not invent alert copy. The emergency word was dropped. |
 | Call start | **B** returns `StartCall`. **A** implements `execute(StartCall)` (Twilio outbound). Sync at start of L4. |
 | `getLiveContext` | **B** implements. **A**’s `/tools/location` only calls it — no Gemini, no Tiger queries in voice. |
 | Deploy | **A** owns DigitalOcean App Platform (Dockerfile, 1 instance, env, `/health`). Claude’s draft omitted this; it is edge work. |
@@ -44,7 +44,7 @@ Do these in one sitting. Neither person starts module work until this lands on `
 - [x] Agree onboarding utterances:
   - first text → create user
   - agent sends Find My `request` card
-  - user: `contact +1… codeword <word>`
+  - user: trusted contact name + number (superseded by the guided onboarding in CONTEXT)
   - `HOME` while live fix → write `users.home`
   - night default `22:00–06:00` in `users.tz`
 - [x] Env template `.env.example` (keys only, no secrets): Spectrum, Tiger, Gemini, ElevenLabs, tools secret, `PROVIDER`, `PORT`
@@ -75,9 +75,9 @@ async handle(event): Promise<Action[]> {
 - [ ] Map inbound Spectrum text → `UserText` (`time` from `Clock.now()`)
 - [ ] Map inbound tapbacks → `UserReaction` using `Emoji.like` / `dislike` / `emphasize` / `question` (👍 👎 ‼️ ❓)
 - [ ] Implement `execute(SendText)` — return `messageId`; store last id **per tag** (`prompt`, `checkin`, `nudge`, …)
-- [ ] Implement `execute(AlertContact)` — open/send to emergency contact’s iMessage space (E.164); both numbers must be iMessage-capable
+- [ ] Implement `execute(AlertContact)` — open/send to trusted contact’s iMessage space (E.164); both numbers must be iMessage-capable
 - [ ] Onboarding: first inbound creates user id mapping (handle ↔ `userId`); send Find My via `im.locations.request(chatGuid, address)`
-- [ ] Parse `contact +1…` and `codeword …` from user text; persist via a **store callback B exposes** (or temporary in-memory until B’s `users` table is ready — then wire)
+- [x] Guided onboarding, one message per turn: contact (name + validated number, card, or in-thread reply) → monitoring → escalation → location → home; persist via a **store callback B exposes** (or temporary in-memory until B’s `users` table is ready — then wire)
 - [ ] On `HOME`: if latest location known, call B’s “set home” write (or queue until store ready)
 - [ ] `im.locations.watch(address)`: reconnect on drop; dedupe `sourceSequence`; **skip** updates missing lat/lon; emit `LocationPing` with optional `accuracyM`, `shortAddress`
 - [ ] Verify before coding (checklist in CONTEXT): locations package vs Spectrum line; send return id for tapback matching
@@ -97,15 +97,15 @@ async handle(event): Promise<Action[]> {
 - [ ] Copy `shortAddress` from Find My snapshot onto `LocationPing` when present
 - [ ] No new rules; no Gemini
 
-### L4 — ElevenLabs call + tools + codeword intake
+### L4 — ElevenLabs call + tools
 
-**Demo gate:** stub/`StartCall` places a real outbound call; `/tools/location` returns live context JSON; saying the codeword on the call fires `CallEvent.silent_alert`.
+**Demo gate:** stub/`StartCall` places a real outbound call; `/tools/location` returns live context JSON; the agent reports the call outcome through `/tools/call-outcome`.
 
-- [ ] Implement `execute(StartCall)` → `POST https://api.elevenlabs.io/v1/convai/twilio/outbound-call` with `agent_id`, `agent_phone_number_id`, `to_number`, `conversation_initiation_client_data.dynamic_variables.walk_id` (confirm whether `type` field is required)
-- [ ] Emit `CallEvent` `started` / `ended` when ElevenLabs signals allow (verify which webhook/event)
-- [ ] HTTP routes (same process): `POST /tools/location`, `POST /tools/silent-alert`; shared-secret header; call `brain.getLiveContext(walkId)` for location
-- [ ] Codeword tool: if agent reports codeword → emit `CallEvent` `{ callType: "silent_alert" }` (B’s R13 does the alert)
-- [ ] Bind `walk_id` into tool params via ElevenLabs **dynamic variables**, not free-form model guessing
+- [x] Implement `execute(StartCall)` → `POST https://api.elevenlabs.io/v1/convai/twilio/outbound-call` (`src/voice/index.ts`) with dynamic variables `user_id`, `walk_id`, `display_name`, `street`, `minutes_walking`. A failed call texts the user and is fed back as `ended_unresolved`
+- [x] HTTP routes (same process): `POST /tools/location`, `POST /tools/call-outcome`; `x-tools-secret` header; location calls `brain.getLiveContext(walkId)`
+- [ ] ElevenLabs agent config: webhook tools pointing at those routes, the secret header, and a prompt that reports `started` when the user answers, then exactly one of `resolved_safe` / `request_escalation` / `ended_unresolved`. Picking up is not "safe"
+- [ ] Bind `user_id` / `walk_id` into tool params via ElevenLabs **dynamic variables**, not free-form model guessing
+- [ ] Report `ended_unresolved` when the call ends without an outcome (post-call webhook), so a pending contact step doesn't wait for the 15 min guard
 - [ ] Local: ngrok → tools URLs until DO is up
 - [ ] Sync with B: they return `StartCall` from R11; you only execute
 
@@ -160,7 +160,7 @@ async handle(event): Promise<Action[]> {
 - [ ] Log every fired rule to `events` with `rule_id`
 - [ ] Persist `walks.status` / phase so restart can resume
 - [ ] Simulator: scripted polyline + clock into `handle`
-- [ ] Export store helpers A needs: upsert user, set contact/codeword, set home
+- [ ] Export store helpers A needs: upsert user, set contact, set home
 
 ### L2 — Check-ins + escalation (default plan)
 
@@ -193,12 +193,11 @@ async handle(event): Promise<Action[]> {
 
 ### L4 — Call rules (needs A’s `execute(StartCall)`)
 
-**Demo gate:** sim ‼️ → `StartCall` action; inject `silent_alert` → `AlertContact`, stay `CALLING`.
+**Demo gate:** sim ‼️ → `StartCall` action; inject `request_escalation` → `AlertContact`, stay `CALLING`.
 
 - [ ] **R11** ‼️ or text `call me` → `CALLING` + `StartCall` immediately (**floor**)
-- [ ] **R13** on `CallEvent.silent_alert` → `AlertContact`, leave call up (**floor**)
 - [ ] `getLiveContext(walkId)` from in-memory window (+ last `shortAddress`) — **no LLM**
-- [ ] On `CallEvent.ended` → return to `WALKING` (or prior non-call phase)
+- [x] Call outcomes: `resolved_safe` → `WALKING`, cancel pending contact; `request_escalation` / `ended_unresolved` with a pending contact step → `AlertContact`
 
 ### L5 — Polish
 
@@ -219,9 +218,9 @@ async handle(event): Promise<Action[]> {
 | --- | --- |
 | Hour 0 | Shared types + clock + templates on `main` |
 | End of L1 | A can emit real `LocationPing` / reactions; B’s L1 rules pass on sim; wire A→B `handle` + B→A `execute` in `index.ts` |
-| Start of L4 | Agree `StartCall.vars` and tool secret header; A stands up `/tools/*`; B ships R11/R13 |
+| Start of L4 | Agree `StartCall.vars` and tool secret header; A stands up `/tools/*`; B ships R11 + call outcomes |
 | L4b | A deploys DO; B confirms walk resume from Tiger after restart |
-| Pre-demo | One cloud user: onboarding → night prompt → walk → check-in → ‼️ call → codeword alert → home |
+| Pre-demo | One cloud user: onboarding → night prompt → walk → check-in → ‼️ call → "reach my contact" on the call → alert → home |
 
 ---
 
@@ -232,7 +231,7 @@ async handle(event): Promise<Action[]> {
 | L1 | Onboarding, Spectrum, locations | Schema, window, R1–R4, R14, sim |
 | L2 | messageId / check-in plumbing | R5b, R7, R8, R9a, R10, R16 |
 | L3 | shortAddress passthrough | Seed, WalkPlan, R5a, R6, R9b, R15 |
-| L4 | ElevenLabs call + tools + codeword event | R11, R13, getLiveContext |
+| L4 | ElevenLabs call + tools + call outcomes | R11, call outcomes, getLiveContext |
 | L4b | DO App Platform always-on | Verify resume-from-Tiger |
 | L5 | Photon SIP | Gemini writeMessages, dashboard, R12 |
 
@@ -243,5 +242,5 @@ async handle(event): Promise<Action[]> {
 1. Terminal + sim: B’s L1–L3 rules green without a phone.  
 2. Cloud iMessage: A’s onboarding + Find My + tapbacks.  
 3. Integrated: prompt → walk → unusual check-in → silence escalation.  
-4. ‼️ places call; codeword alerts contact; home closes walk.  
+4. ‼️ places call; asking for help on the call alerts the contact; home closes walk.  
 5. Process on DO App Platform (1 instance) with ElevenLabs tools on HTTPS.

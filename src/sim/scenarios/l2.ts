@@ -1,5 +1,5 @@
 /**
- * L2 scenario suite: R5b, R7, R8, R9a, R10, R16
+ * L2 scenario suite: R5b, R7, R8 (timer), R9a, R10 (+ escalation policy / timeouts), R16
  */
 import { SimClock } from "../../shared/clock.ts";
 import { createBrainEngine } from "../../brain/engine.ts";
@@ -52,7 +52,6 @@ async function main() {
     userId: DEMO.userId,
     handle: DEMO.handle,
     contact: DEMO.contact,
-    codeword: DEMO.codeword,
     homeLat: DEMO.homeLat,
     homeLon: DEMO.homeLon,
     nightStart: DEMO.nightStart,
@@ -91,6 +90,27 @@ async function main() {
     console.log("R5b ok");
   }
 
+  // R5b must not fire on a steady walk with frequent pings (~20 m apart)
+  {
+    const clock = new SimClock(night());
+    const brain = createBrainEngine({ clock, getUser, persist: true });
+    await startWalking(brain, clock);
+    let sends = 0;
+    for (let i = 1; i <= 20; i++) {
+      clock.advance(15_000);
+      const a = await brain.handle({
+        type: "LocationPing",
+        userId: DEMO.userId,
+        time: clock.now(),
+        lat: DEMO_ORIGIN.lat + i * 0.000175,
+        lon: DEMO_ORIGIN.lon,
+      });
+      sends += a.filter((x) => x.type === "SendText" && x.tag === "checkin").length;
+    }
+    assert(sends === 0, `R5b: steady walk should not check in (got ${sends})`);
+    console.log("R5b steady walk ok");
+  }
+
   // R7a late
   {
     const clock = new SimClock(night());
@@ -113,7 +133,7 @@ async function main() {
     console.log("R7 ok");
   }
 
-  // R8 gap 4 min
+  // R8: no location update for 3 min → check-in from the timer alone
   {
     const clock = new SimClock(night());
     const brain = createBrainEngine({ clock, getUser, persist: true });
@@ -125,20 +145,96 @@ async function main() {
       lat: DEMO_ORIGIN.lat + 0.001,
       lon: DEMO_ORIGIN.lon,
     });
-    clock.advance(4 * 60_000 + 500);
-    const actions = await brain.handle({
+    clock.advance(2 * 60_000);
+    const early = await brain.tick(clock.now());
+    assert(early.length === 0, "R8: nothing before noUpdateMin");
+    clock.advance(60_000 + 500);
+    const actions = await brain.tick(clock.now());
+    assert(
+      actions.some((a) => a.type === "SendText" && a.tag === "checkin"),
+      "R8: expected checkin from tick with no new ping",
+    );
+    assert(brain.getPhase(DEMO.userId) === "CHECKING_IN", "R8: CHECKING_IN");
+    clock.advance(60_000);
+    const again = await brain.tick(clock.now());
+    assert(
+      !again.some((a) => a.type === "SendText" && a.tag === "checkin"),
+      "R8: fires once per silence",
+    );
+    console.log("R8 ok");
+  }
+
+  // R10 policy: NONE → one final nudge, no contact, no call
+  {
+    const clock = new SimClock(night());
+    const brain = createBrainEngine({
+      clock,
+      getUser: async () => ({
+        ...(await getUser()),
+        escalation: { initialAction: "TEXT_USER" as const, onNoTextResponse: "NONE" as const },
+      }),
+      persist: true,
+    });
+    await startWalking(brain, clock);
+    await brain.handle({
       type: "LocationPing",
       userId: DEMO.userId,
       time: clock.now(),
-      lat: DEMO_ORIGIN.lat + 0.0012,
+      lat: DEMO_ORIGIN.lat + 0.001,
       lon: DEMO_ORIGIN.lon,
     });
+    clock.advance(3 * 60_000 + 500);
+    await brain.tick(clock.now());
+    clock.advance(60_000);
+    const nudge = await brain.tick(clock.now());
+    assert(nudge.some((a) => a.type === "SendText" && a.tag === "nudge"), "NONE: nudge");
+    clock.advance(60_000);
+    const final = await brain.tick(clock.now());
     assert(
-      actions.some((a) => a.type === "SendText" && a.tag === "checkin") ||
-        (await countRule("R8")) >= 1,
-      "R8: expected checkin on gap",
+      final.some((a) => a.type === "SendText" && a.text.includes("won't reach out")),
+      "NONE: final nudge",
     );
-    console.log("R8 ok");
+    assert(
+      !final.some((a) => a.type === "AlertContact" || a.type === "StartCall"),
+      "NONE: no contact / call",
+    );
+    clock.advance(5 * 60_000);
+    const after = await brain.tick(clock.now());
+    assert(after.length === 0, "NONE: silent after the final nudge");
+    console.log("R10 NONE floor ok");
+  }
+
+  // R10 policy: CALL_USER with custom 30 s / 30 s timeouts
+  {
+    const clock = new SimClock(night());
+    const brain = createBrainEngine({
+      clock,
+      getUser: async () => ({
+        ...(await getUser()),
+        escalation: { initialAction: "TEXT_USER" as const, onNoTextResponse: "CALL_USER" as const },
+        timeouts: { nudgeAfterSec: 30, escalateAfterSec: 30 },
+      }),
+      persist: true,
+    });
+    await startWalking(brain, clock);
+    await brain.handle({
+      type: "LocationPing",
+      userId: DEMO.userId,
+      time: clock.now(),
+      lat: DEMO_ORIGIN.lat + 0.001,
+      lon: DEMO_ORIGIN.lon,
+    });
+    clock.advance(3 * 60_000 + 500);
+    await brain.tick(clock.now());
+    clock.advance(30_000);
+    const nudge = await brain.tick(clock.now());
+    assert(nudge.some((a) => a.type === "SendText" && a.tag === "nudge"), "CALL_USER: nudge at 30 s");
+    clock.advance(30_000);
+    const call = await brain.tick(clock.now());
+    assert(call.some((a) => a.type === "StartCall"), "CALL_USER: StartCall at 60 s");
+    assert(!call.some((a) => a.type === "AlertContact"), "CALL_USER: no contact");
+    assert(brain.getPhase(DEMO.userId) === "CALLING", "CALL_USER: CALLING");
+    console.log("R10 CALL_USER + custom timeouts ok");
   }
 
   // R9a + R10

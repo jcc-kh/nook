@@ -1,5 +1,5 @@
 /**
- * L1 scenario suite: R1, R2, R2x, R3, R4, R14
+ * L1 scenario suite: R1, R2, R2x, R3, R4, R14 (arrival texts the user, not the contact)
  * Usage: bun run sim:l1
  */
 import { SimClock } from "../../shared/clock.ts";
@@ -44,7 +44,6 @@ async function main() {
     userId: DEMO.userId,
     handle: DEMO.handle,
     contact: DEMO.contact,
-    codeword: DEMO.codeword,
     homeLat: DEMO.homeLat,
     homeLon: DEMO.homeLon,
     nightStart: DEMO.nightStart,
@@ -228,8 +227,12 @@ async function main() {
     lon: DEMO.homeLon,
   });
   assert(
-    arriveActions.some((a: Action) => a.type === "AlertContact"),
-    "R14: expected AlertContact",
+    arriveActions.some((a: Action) => a.type === "SendText" && a.tag === "arrived"),
+    "R14: expected arrived text to the user",
+  );
+  assert(
+    !arriveActions.some((a: Action) => a.type === "AlertContact"),
+    "R14: contact must not be texted on arrival",
   );
   assert(brain4.getPhase(DEMO.userId) === "IDLE", "R14: expected IDLE");
   assert((await countRule("R14")) >= 1, "R14 event");
