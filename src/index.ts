@@ -8,6 +8,7 @@ import { createSpectrumMessenger, type Provider } from "./messenger/spectrum.ts"
 import { toE164 } from "./messenger/parse.ts";
 import { createUserStore } from "./store/index.ts";
 import { callMode, voiceConfigFromEnv } from "./voice/index.ts";
+import { nextGuidance } from "./voice/guidance.ts";
 import { createTalkLinks } from "./voice/talk.ts";
 import { createVonageCalls, type BridgeSocket } from "./voice/vonage.ts";
 import { createLiveSim, SCENARIOS, type ScenarioName } from "./sim/live.ts";
@@ -197,6 +198,23 @@ async function handleTool(req: Request, url: URL): Promise<Response> {
   if (url.pathname === "/tools/location") {
     const ctx = await brain.getLiveContext(walkId);
     return ctx ? Response.json(ctx) : Response.json({ ok: false, error: "no live location" }, { status: 404 });
+  }
+
+  if (url.pathname === "/tools/safe-place" || url.pathname === "/tools/guidance") {
+    const ctx = await brain.getLiveContext(walkId);
+    if (!ctx) {
+      return Response.json({
+        ok: false,
+        status: "no_location",
+        say: ["I don't have a fresh location yet. Take a few steps and I'll look again."],
+      });
+    }
+    const refresh = params.refresh === true || params.refresh === "true";
+    const guide = await nextGuidance(walkId, { lat: ctx.lat, lon: ctx.lon, headingDeg: ctx.headingDeg }, { refresh });
+    console.log(
+      `[voice] guidance for walk ${walkId}: ${guide.ok ? `${guide.status} ${guide.destination} — ${guide.instruction}` : guide.status}`,
+    );
+    return Response.json({ street: ctx.street, ...guide });
   }
 
   if (url.pathname === "/tools/call-outcome") {

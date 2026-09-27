@@ -12,7 +12,7 @@ import type {
   WriteMessages,
 } from "../shared/types.ts";
 import { toCell } from "../shared/cell.ts";
-import { distanceM, pathLengthM, speedMps } from "../shared/geo.ts";
+import { bearingDeg, distanceM, pathLengthM, speedMps } from "../shared/geo.ts";
 import {
   contactAlert,
   nextStepLine,
@@ -1613,11 +1613,13 @@ export function createBrainEngine(deps: BrainDeps) {
       const minutesWalking = rt.walkStartedAt
         ? (deps.clock.now().getTime() - rt.walkStartedAt.getTime()) / 60000
         : 0;
+      const headingDeg = travelHeading(rt.pings, last);
       return {
         street: rt.lastShortAddress ?? "unknown street",
         lat: last.lat,
         lon: last.lon,
         minutesWalking,
+        ...(headingDeg !== undefined && { headingDeg }),
       };
     }
     return null;
@@ -1635,3 +1637,15 @@ export function createBrainEngine(deps: BrainDeps) {
 }
 
 const DEMO_FALLBACK = { lat: 40.8075, lon: -73.9626 };
+
+/** Heading from an earlier ping, once the phone has moved enough that Find My noise won't flip left and right. */
+function travelHeading(pings: LocationPing[], last: LocationPing): number | undefined {
+  for (let i = pings.length - 1; i >= 0; i--) {
+    const prev = pings[i]!;
+    if (prev.time.getTime() === last.time.getTime() && prev.lat === last.lat && prev.lon === last.lon) continue;
+    if (distanceM(prev.lat, prev.lon, last.lat, last.lon) >= 15) {
+      return bearingDeg(prev.lat, prev.lon, last.lat, last.lon);
+    }
+  }
+  return undefined;
+}

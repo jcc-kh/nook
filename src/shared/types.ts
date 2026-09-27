@@ -146,6 +146,8 @@ export interface LiveContext {
   lat: number;
   lon: number;
   minutesWalking: number;
+  /** Direction of travel, degrees clockwise from north. Set when two recent pings are far enough apart. */
+  headingDeg?: number;
 }
 
 export interface Brain {

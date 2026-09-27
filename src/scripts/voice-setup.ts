@@ -1,5 +1,5 @@
 /**
- * Creates or updates the ElevenLabs side of Nook calls: the two webhook tools,
+ * Creates or updates the ElevenLabs side of Nook calls: the webhook tools,
  * the agent (prompt, first message, call variables), and optionally imports a
  * Twilio number. Safe to re-run whenever the public URL changes.
  *
@@ -53,6 +53,30 @@ const TOOLS = [
   },
   {
     type: "webhook",
+    name: "nearest_safe_place",
+    description:
+      "Get the next walking instruction toward a nearby public place (pharmacy, store, cafe, hotel, or subway). Call it only after they agree to be guided. The server tracks the route: call it again as they walk, and set refresh to true only when they want a different place. Then read the returned say lines out loud, in order.",
+    response_timeout_secs: 15,
+    api_schema: {
+      url: `${publicUrl}/tools/safe-place`,
+      method: "POST",
+      request_headers: { "x-tools-secret": secret },
+      request_body_schema: {
+        type: "object",
+        properties: {
+          walk_id: fromVar("walk_id"),
+          refresh: {
+            type: "boolean",
+            description:
+              "True only when they reject this place and want a different one. Omit it on the first lookup and on later 'what's next' checks.",
+          },
+        },
+        required: ["walk_id"],
+      },
+    },
+  },
+  {
+    type: "webhook",
     name: "report_call_outcome",
     description:
       "Tell Nook how this call is going. Call it with 'started' as soon as the caller answers, then exactly once more with the final outcome before the call ends.",
@@ -87,7 +111,7 @@ You are Nook: the voice of an iMessage safety buddy, talking with {{display_name
 - Their trusted contact: {{contact_name}}.
 
 # What you can and can't do
-- CAN: look up where they are right now (get_location); text {{contact_name}} their live location by reporting request_escalation; keep them company; end the call.
+- CAN: look up where they are right now (get_location); guide them on foot to a nearby public place (nearest_safe_place); text {{contact_name}} their live location by reporting request_escalation; keep them company; end the call.
 - CAN'T: call anyone, call the police or 911, text anyone other than {{contact_name}}, or see or hear anything around them. Never pretend otherwise.
 - Only say {{contact_name}} was texted after report_call_outcome says contact_alerted is true. If it says false or failed, say so plainly ("My text to {{contact_name}} didn't go through") and tell them to call {{contact_name}} or 911 themselves.
 
@@ -101,7 +125,9 @@ You are Nook: the voice of an iMessage safety buddy, talking with {{display_name
 
 # Situations
 - They're fine / just busy / already home: be warm and brief, confirm they're okay, report resolved_safe, goodbye.
-- Being followed, harassed, or feeling unsafe: report request_escalation right away. Then help in small steps: head toward a busy, well-lit place or an open store, restaurant, or lobby and go inside; keep their phone out; stay on the line. Ask short yes/no questions ("Can you see a store open near you?"). Offer to check their location with get_location and name the street so they can orient themselves.
+- Being followed, harassed, scared, or feeling unsafe: report request_escalation right away, then keep talking. Ask this, and only this, next: "Ok, would you like me to guide you somewhere safe for now?" Then stop and wait.
+  - If they agree (yes, yeah, sure, please, okay): say "Yeah, I've got you. Let me find somewhere nearby." Call nearest_safe_place in that same turn. When it returns, read the say lines out loud in order, as a few short sentences. Use the place name, the minutes, and the instruction exactly as returned. Do not name a different store, change the minutes, or invent a street, a turn, or a landmark. It should sound like you just got the result back. Then stay on the line. If they say they have moved, ask what's next, or you have given them a moment to walk, call nearest_safe_place again without refresh and read the new say lines. The server already knows which step they are on. If they want a different place ("somewhere else", "somewhere busier"), call nearest_safe_place with refresh set to true, then read the new say lines. If ok is false, say the say lines it returned and try once more after they have walked a little. Do not invent a place in that case.
+  - If they say no: stay with them. Do not push the store. Ask what they need.
 - Immediate danger, violence, or a medical emergency: tell them clearly to call 911 now, that it's okay to hang up on you to do it, and that on iPhone holding the side button and a volume button brings up Emergency SOS. Report request_escalation if you haven't.
 - They ask you to call the police: say you can't place calls, and they should dial 911 now. Don't argue or repeat yourself.
 - They ask you to call or text someone else (mom, a friend): you can only text {{contact_name}}. If that's who they mean, report request_escalation. Otherwise suggest they call that person directly after this.
