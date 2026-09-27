@@ -52,3 +52,6 @@ Thumbs.db
 
 # Local voice previews
 voice-samples/
+
+# Received iMessage voice notes
+data/

@@ -134,7 +134,7 @@ async function scenarioUsualPath(getUser: () => Promise<UserRecord>) {
   const brain = createBrainEngine({
     clock,
     getUser,
-    parseReply: llm.parseReply,
+    classify: llm.classify,
     writeMessages: llm.writeMessages,
     persist: false,
     verbose: true,
@@ -179,7 +179,7 @@ async function scenarioOffRoute(getUser: () => Promise<UserRecord>) {
   const brain = createBrainEngine({
     clock,
     getUser,
-    parseReply: llm.parseReply,
+    classify: llm.classify,
     writeMessages: llm.writeMessages,
     persist: false,
     verbose: true,
@@ -237,7 +237,7 @@ async function scenarioLate(
   const brain = createBrainEngine({
     clock,
     getUser,
-    parseReply: llm.parseReply,
+    classify: llm.classify,
     writeMessages: llm.writeMessages,
     persist: false,
     verbose: true,
@@ -304,7 +304,7 @@ async function scenarioKnownStop(getUser: () => Promise<UserRecord>) {
   const brain = createBrainEngine({
     clock,
     getUser,
-    parseReply: llm.parseReply,
+    classify: llm.classify,
     writeMessages: llm.writeMessages,
     persist: false,
     verbose: true,
@@ -371,7 +371,7 @@ async function scenarioFriend(getUser: () => Promise<UserRecord>) {
   const brain = createBrainEngine({
     clock,
     getUser,
-    parseReply: llm.parseReply,
+    classify: llm.classify,
     writeMessages: llm.writeMessages,
     persist: false,
     verbose: true,

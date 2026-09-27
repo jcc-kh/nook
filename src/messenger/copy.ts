@@ -6,6 +6,7 @@ import {
   type NoResponseAction,
   type TrustedContact,
 } from "../shared/settings.ts";
+import { LEGEND, tripStart, withLegend } from "../shared/templates.ts";
 import type { UserRecord } from "../store/index.ts";
 
 /** Trusted contact as the user refers to them ("Alex" / "my trusted person"). */
@@ -19,12 +20,7 @@ function yours(contact?: TrustedContact): string {
 }
 
 export const monitoringOptions: MonitoringMode[] = ["MANUAL", "EVENINGS", "AWAY_FROM_HOME"];
-export const escalationOptions: NoResponseAction[] = [
-  "CALL_USER",
-  "CONTACT_TRUSTED",
-  "CALL_THEN_CONTACT",
-  "NONE",
-];
+export const escalationOptions: NoResponseAction[] = ["CONTACT_TRUSTED", "NONE"];
 
 const monitoringLabel: Record<MonitoringMode, string> = {
   MANUAL: "only when you start a trip",
@@ -35,28 +31,20 @@ const monitoringLabel: Record<MonitoringMode, string> = {
 /** User's voice, used in the settings summary. */
 function escalationSummary(action: NoResponseAction, c?: TrustedContact): string {
   switch (action) {
-    case "CALL_USER":
-      return "text me first, then call me";
     case "CONTACT_TRUSTED":
-      return `text me first, then contact ${theirs(c)}`;
-    case "CALL_THEN_CONTACT":
-      return `text me first, then call me, then contact ${theirs(c)} if I still don't respond`;
+      return `text me first, then text ${theirs(c)} my location`;
     case "NONE":
-      return "text me first, nothing further";
+      return "text me first, then just keep checking in";
   }
 }
 
-/** Nook's voice: what happens if a check-in goes unanswered. */
+/** Nook's voice: what happens if a check-in can't confirm they're okay. */
 function escalationPlan(action: NoResponseAction, c?: TrustedContact): string {
   switch (action) {
-    case "CALL_USER":
-      return "i'll call you";
     case "CONTACT_TRUSTED":
-      return `i'll contact ${yours(c)}`;
-    case "CALL_THEN_CONTACT":
-      return `i'll call you, then contact ${yours(c)} if you still don't respond`;
+      return `i'll text ${yours(c)} your location`;
     case "NONE":
-      return "i won't escalate further";
+      return "i'll just keep checking in with you";
   }
 }
 
@@ -103,7 +91,10 @@ export const copy = {
   askContact: "who should i contact if something seems wrong? send me their name and phone number (or share their contact card).",
   /** First message to a new user: who Nook is, then the first question. */
   welcome:
-    "hi, i'm nook 🌙 i keep an eye on your trips and check in if something seems unusual. if i can't confirm you're okay, i can call you or reach someone you trust.\n\nfirst, what's your name?",
+    "hi, i'm nook 🌙 i keep an eye on your trips and check in if something seems off.\n\n" +
+    "when i check in, just reply, or tap a shortcut:\n" +
+    "👍 safe\n👎 uneasy, i'll help you pick a way or somewhere busier\n❓ call me, for hands-free guidance\n‼️ immediate danger, i'll tell you to call 911 and text your trusted person where you are\n\n" +
+    "first, what's your name?",
   askUserName: "what's your name? i'll use it when i check in, and so your trusted contact knows who i'm texting about.",
   badUserName: "just your first name is fine, like 'alex'.",
   userNameSaved: (name: string) => `nice to meet you, ${name}.`,
@@ -121,7 +112,7 @@ export const copy = {
     "when should i keep an eye on your location?\n1. only when i tell nook i'm heading somewhere\n2. during evenings / nighttime\n3. whenever i'm away from home",
 
   askEscalation: (c?: TrustedContact) =>
-    `if something seems unusual, i'll check in with you by text first.\n\nif you don't respond, what should i do next?\n1. call me\n2. contact ${theirs(c)}\n3. call me, then contact ${theirs(c)} if i still don't respond\n4. don't escalate further`,
+    `if something seems unusual, i'll check in with you by text first.\n\nif i check in and can't confirm you're okay:\n1. text ${theirs(c)} my location\n2. just keep checking in with me\n\n(immediate danger is different: if you tap ‼️ or tell me you're in danger, i'll always text ${yours(c)} right away.)`,
 
   locationRequest:
     "next, share your location with me using the card below (choose share indefinitely). or reply 'skip' to do it later.",
@@ -139,9 +130,12 @@ export const copy = {
     const lines = ["you're all set 🌙", monitoringPlan(user)];
     if (user.escalation) {
       lines.push(
-        `if something looks unusual i'll text you first. if you don't answer, ${escalationPlan(user.escalation.onNoTextResponse, user.trustedContact)}.`,
+        `if something looks unusual i'll text you first. if i can't confirm you're okay, ${escalationPlan(user.escalation.onNoTextResponse, user.trustedContact)}.`,
       );
     }
+    lines.push(
+      `when i check in: ${LEGEND}. if you tell me you're in immediate danger, i'll tell you to call 911 and text ${yours(user.trustedContact)} your location and what you said. text 'call me' anytime if you want me on the phone.`,
+    );
     if (user.homeLat === undefined) {
       lines.push(
         "one more thing: text 'home' next time you're there, so i know where home is and can tell when you've made it back.",
@@ -160,10 +154,72 @@ export const copy = {
     "i haven't learned enough about your routine yet. as you use nook, i'll gradually pick up patterns like places you visit often and routes you commonly take.",
 
   talkLink: (url: string) => `📞 tap to talk to me now: ${url}`,
-  callFailed: "i tried to call you but couldn't place the call. tap 👍 if you're okay, or text me.",
   contactAlerted: (name?: string) => `i've let ${name ?? "your trusted contact"} know and sent them your location.`,
   contactUnreachable: (name?: string) =>
-    `i tried to reach ${name ?? "your trusted contact"} but my message didn't go through. if you need help, contact someone directly. tap 👍 if you're okay.`,
+    `i tried to reach ${name ?? "your trusted contact"} but my message didn't go through. if you need help, contact someone directly. reply ok if you're okay.`,
+  emergencyDelivered: (name?: string, attachmentsOk = true) =>
+    attachmentsOk
+      ? `sent. ${name ?? "your trusted contact"} has your location and what you told me.`
+      : `sent ${name ?? "your trusted contact"} your location and what you told me, but your voice message didn't attach.`,
+  emergencyFailed: (name?: string) =>
+    `my text to ${name ?? "your trusted contact"} didn't go through. please call 911${name ? ` or ${name}` : ""} directly.`,
+  emergencyNoContact: "i don't have a trusted contact saved, so i couldn't alert anyone. please call 911 directly.",
+  voiceNoteForwarded: (name?: string) => `passed your voice message on to ${name ?? "your trusted contact"}.`,
+  voiceNoteForwardFailed: (name?: string) =>
+    `couldn't forward your voice message to ${name ?? "your trusted contact"}. if you can, call them or 911 directly.`,
+
+  // --- safety states (see brain/engine.ts applyIntent) ---
+  legend: LEGEND,
+  /** Uneasy: ask which way, unless they already said. */
+  uneasyAsk: (dest: string) =>
+    `i've got you. want to keep heading to ${dest}, or go somewhere busier first? reply 'keep going' or 'busier'.`,
+  callOffer: "if you'd rather have me on the phone, text 'call me' or tap ❓.",
+  uneasyKeepGoing: (dest: string, instruction?: string) =>
+    [`okay, keep heading to ${dest}. i'm watching your location.`, instruction].filter(Boolean).join(" "),
+  busierOptions: (lines: string[]) =>
+    `closest busier spots that look open:\n${lines.join("\n")}\nreply 1-${lines.length} and i'll route you there, or 'keep going' to stay on your way.`,
+  busierNone:
+    "i couldn't find an open place near you in my data. stick to main streets with lights and people, and text 'call me' if you want me on the phone.",
+  busierPicked: (name: string, instruction?: string) =>
+    [`okay, heading to ${name}. i'll watch until you're there.`, instruction].filter(Boolean).join(" "),
+  navNoFix: "i can't see a fresh location for you right now, so i can't give turn directions. stick to busy, lit streets.",
+  uneasyStillWithYou: "i'm still with you. keep to busy, lit streets. text 'call me' if you want me on the phone.",
+
+  /** Ambiguous danger: confirm before alerting anyone. */
+  dangerConfirm: "are you in immediate danger right now? reply yes or no.",
+  dangerConfirmNudge: "are you in immediate danger? reply yes or no, or tap ‼️ if yes.",
+  dangerGuidance: (contactName: string | undefined, calling: boolean) =>
+    [
+      "if you can, call 911 now.",
+      contactName
+        ? `i'm texting ${contactName} your location and what you told me.`
+        : "i don't have a trusted contact saved, so i can't alert anyone for you.",
+      calling
+        ? "calling you now too."
+        : "if you want me on the phone, text 'call me' or tap ❓. you can also send a voice message and i'll pass it on.",
+    ].join("\n"),
+  dangerStill: (contactName?: string) =>
+    `i'm still here. if you can, call 911. ${contactName ? `${contactName} already has your location.` : ""} reply ok once you're safe.`.replace(/\s+/g, " ").trim(),
+  dangerResolved: "okay, glad you're safe. i'll keep watching your trip.",
+
+  /** Voice mode. */
+  callStarting: "calling you now. just talk normally, silence is fine.",
+  callEnded: withLegend("call ended. you okay?"),
+  callMissed: withLegend("couldn't reach you on the call. you okay?"),
+  callsUnavailable: "i can't place calls right now, but i'm still here by text. tell me what's going on.",
+  /** Reached the busier stop they picked while uneasy. */
+  interimArrived: (name: string, dest: string) =>
+    `you're at ${name}. stay as long as you need. when you're ready, reply 'keep going' and i'll get you to ${dest}.`,
+  /** Follow-up to the trusted contact once the user says they're okay. */
+  contactUpdateSafe: (who: string) => `update from nook: ${who} just told me they're okay.`,
+
+  /** Destinations. */
+  destinationSet: (name: string) => `got it, heading to ${name}. i'll watch that route.`,
+  destinationUnreadable: "couldn't read that link. can you share the place from apple maps, or send the full link or address?",
+  arrivedAt: (name: string) => `made it to ${name} 👍`,
+
+  voiceNoteUnclear: "got your voice message but couldn't make it out. can you type it?",
+  voiceNoteOnboarding: "i can't use voice messages while we're setting up. can you type your answer?",
 
   homeSaved: "home saved.",
   homeNoFix:
@@ -171,13 +227,17 @@ export const copy = {
 
   greetingIdle:
     "hey, text me 'walk me home' when you head out, or i'll notice if you start walking at night. text 'stop' anytime to dismiss me",
-  greetingPrompted: "still waiting. 👍 to start the walk, or 👎 / text 'stop' if you're not heading out",
+  greetingPrompted: "still waiting. reply yes to start the walk, or text 'stop' if you're not heading out",
   greetingWalking: "hey, still with you on this trip. text 'stop' if you don't need me, or text if you need anything",
   idleUnclear: "i can walk you home, or text 'settings'. didn't catch a trip in that",
+  /** Explicit trip start (walk me home / yes to a prompt). */
+  started: tripStart("ok i'm with you. i'll only text if something looks off."),
   /** Night movement / soft rejoin after a restart. starts tracking, no reaction needed. */
-  nightOut: "hey, saw that you were out. it's getting late, i'll walk you home. text 'stop' if you don't need me",
-  nightOutUnfamiliar:
-    "hey, saw that you were out. it's getting late, i'll walk you home. this isn't an area you've been much; i'll check in if anything looks off. text 'stop' anytime",
+  nightOut: tripStart("hey, saw that you were out. it's getting late, i'll walk you home."),
+  nightOutUnfamiliar: tripStart(
+    "hey, saw that you were out. it's getting late, i'll walk you home. this isn't an area you've been much; i'll check in if anything looks off.",
+  ),
+  softRejoin: "hey, i'm back with you on this trip. i'll only text if something looks off. text stop anytime.",
   unfamiliarArea:
     "noticed you started walking but this isn't an area you've been. i'll check in with you in a bit. text 'stop' if you're all set",
   dismissed: "got it, i'll stop asking. text walk me home anytime",
@@ -188,7 +248,7 @@ export const copy = {
   confirmContact: (c: TrustedContact) =>
     `make ${contactLabel(c)} your trusted contact? reply yes to confirm.`,
   confirmEscalation: (action: NoResponseAction, c?: TrustedContact) =>
-    `if you miss a check-in, ${escalationPlan(action, c)}. save this? reply yes to confirm.`,
+    `if i can't confirm you're okay after a check-in, ${escalationPlan(action, c)}. save this? reply yes to confirm.`,
 
   askNudgeAfter: (current: number) =>
     `if you don't answer a check-in, how many seconds should i wait before nudging you? (30-600, now ${current}s. say 'same' to keep it.)`,

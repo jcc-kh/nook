@@ -6,7 +6,7 @@ Shared contract for Dev A (edge) and Dev B (brain). Hackathon: 2 developers, ~20
 
 ## Product
 
-An iMessage agent that walks users home at night. Users share Find My location with the agent's contact once. When Nook is watching (the user picks when: only trips they start, evenings, or whenever they're away from home) and they start walking, the agent texts first ("Heading home? 👍"). During the walk it checks in only when something is unusual for that user (stopped, off their usual route, late, or no location updates). If a check-in goes unanswered it nudges once, then takes the step the user chose (call them, text their trusted contact, both, or nothing more). On ‼️ it places a fake phone call from an AI "friend". Arriving home texts the user, not the contact: the trusted contact hears from Nook only when something is wrong. The agent never contacts police itself.
+An iMessage agent that walks users home at night. Users share Find My location with the agent's contact once. When Nook is watching (the user picks when: only trips they start, evenings, or whenever they're away from home) and they start walking, the agent texts first ("Heading home? 👍"). During the walk it checks in only when something is unusual for that user (stopped, off their usual route, late, or no location updates). If a check-in goes unanswered it nudges once, then takes the step the user chose (text their trusted contact, or just keep checking in). It never calls on its own: a voice call is an opt-in hands-free companion the user asks for (❓ or "call me"). If the user says they're in immediate danger (‼️, text, voice note, or on a call) Nook tells them to call 911 and texts their trusted contact a detailed alert right away. Arriving home texts the user, not the contact: the trusted contact hears from Nook only when something is wrong. The agent never contacts police itself.
 
 ## Stack
 
@@ -27,12 +27,33 @@ Docs index: [https://photon.codes/docs/llms.txt](https://photon.codes/docs/llms.
 
 1. No LLM call on the location-ping path. Rules are deterministic code.
 2. Personalization = numbers from Tiger (typical walk time, known stops, usual route) loaded once per walk into a `WalkPlan`.
-3. Safety floors always act and ignore personalization: an unanswered check-in (R10), no location updates (R8), ‼️ / "call me" (R11), a "help" reply (R9b). The user's settings decide *which* action a floor takes (call, contact, both, or a final nudge), never *whether* it acts.
+3. Safety floors always act and ignore personalization: an unanswered check-in (R10), no location updates (R8), immediate danger (R9b / ‼️). The user's setting decides *which* action R10 takes (contact or a final nudge), never *whether* it acts. Immediate danger always alerts the trusted contact, whatever the setting.
+3a. Calls never escalate. Silence, a missed call, or a call that ends unresolved never places a call and never alerts anyone by itself; it becomes a text check-in.
 4. Every fired rule is logged to `events` with a `rule_id`.
 5. Injectable clock + GPS simulator: the demo never depends on real GPS/time.
 6. Gemini failures fall back to message templates.
-7. The trusted contact is texted only when something is wrong (escalation, "help", or the user asking for them on a call). After each contact alert the user is told the contact was texted. No "made it home" or "ended elsewhere" texts to the contact.
+7. The trusted contact is texted only when something is wrong (an unanswered check-in with `CONTACT_TRUSTED`, or immediate danger). After each contact alert the user is told truthfully whether it (and any voice-message attachment) went through. No "made it home" or "ended elsewhere" texts to the contact.
 8. User settings are deterministic and structured (`UserSettings`), set in onboarding or by text, confirmed before saving, and stored in Tiger.
+
+## Safety model
+
+Safety state (`safe` / `uneasy` / `immediate_danger`) is separate from the channel (`text` / `voice`). Every input (tapback, text, voice note, call tool) becomes a `SafetyIntent` and goes through `applyIntent` in `brain/engine.ts`.
+
+| Input | Intent | What Nook does |
+| --- | --- | --- |
+| 👍 / "i'm ok" | `safe` | Resume; if the contact was alerted, text them "update: they're okay" |
+| 👎 / "sketchy", "someone walking behind me" | `uneasy` | Never alerts. Asks "keep heading to {destination}, or somewhere busier first?"; busier → up to 3 open places from the nav provider, reply 1–3; offers a call once |
+| ❓ / "call me" | `call` | Hands-free voice companion with a reason (`manual_call`, `uneasy_companion`, `navigation_help`, `lost`, `hands_free_guidance`) and a server-picked `opening_line` |
+| ‼️ / "he has a knife", "call 911" | `danger` clear | "Call 911 now", emergency alert to the trusted contact (even with escalation `NONE`), danger window opens |
+| "help", "someone is following me" | `danger` ambiguous | Asks "are you in immediate danger? yes/no" first; yes / ‼️ → clear danger with the confirmation quoted; no → uneasy |
+
+Every message that relies on tapbacks also states the options in words (`LEGEND`, appended in code). The emergency alert (`shared/alerts.ts`) has labelled lines: who (name + number), confirmed time and channel, street, coordinates, fix age, what they said (labelled by source), nook's response, trip, map link, "please call them now". While the danger window is open, new voice notes are forwarded as the original audio plus a labelled machine transcript (deduped by message id, max 5). Messages are sent text first, then audio, then transcript, and the user is told exactly what went through.
+
+Destinations: on trip start Nook asks for an Apple Maps place. Full `maps.apple.com` links (ll / q / daddr / address), rich links, coordinates, and "heading to X" (geocoded) set `walks.dest_*`. Short `maps.apple` links aren't expanded yet; Nook asks for the full link.
+
+Navigation (`src/nav`): `NAV_PROVIDER=fixture` (hand-written 2–3 step routes around Columbia, default) or `geoapify` (live, per-request fallback to the fixture). Guidance needs a fix ≤ `NAV_STALE_SECONDS` (30); describing location / alerts uses ≤ 90 s. Off route > `NAV_OFF_ROUTE_METERS` (60) reroutes at most every `NAV_REROUTE_COOLDOWN_SECONDS` (20).
+
+Voice tools (`POST /tools/*`, header `x-tools-secret`): `location`, `navigation`, `safe-destinations`, `set-destination {choice: home|trip|place_id}`, `call-outcome {outcome, situation?}`. `request_escalation` = immediate danger with `situation` quoted to the contact; `ended_unresolved` = text check-in only.
 
 ## Architecture
 
@@ -62,7 +83,7 @@ flowchart LR
 
 ### Invariants
 
-- `LocationPing` handling is pure rules. Gemini runs only in `llm/writeMessages` (once, when a walk starts, L5) and `llm/parseReply` (free-text replies, L3). Template strings are the fallback and the L1–L2 default.
+- `LocationPing` handling is pure rules. Gemini runs only in `llm/writeMessages` (once, when a walk starts, L5) and `llm/classify` (free text and voice-note transcripts → `SafetyIntent`). Template strings and the regex classifier are the fallback. Gemini can never raise clear danger on its own or erase a regex danger signal (`guardIntent`).
 - Personalization is a `WalkPlan` loaded once when entering `WALKING`. Safety floors ignore it.
 - Every fired rule inserts `events` with a `rule_id`. Pings are stored even when R1 suppresses prompts.
 - `Clock.now()` is the only time source. The simulator never needs a real GPS fix or the real clock.
@@ -80,7 +101,9 @@ Edge → brain: events. Brain → edge: actions. Edge → brain query: `getLiveC
 
 Inbound texts go through the deterministic onboarding / settings router (`messenger/onboarding.ts`) first. Anything that isn't onboarding or a settings intent is dispatched to the brain as `UserText`. In-thread replies (Spectrum `reply` content) and shared contact cards are flattened to text first, and Nook answers inside the same thread.
 
-Actions run in order through `runActions` (`index.ts`). If `StartCall` throws (ElevenLabs not configured or the request fails), the user is texted that the call couldn't be placed and the brain receives `CallEvent` `ended_unresolved`, so a pending contact step still fires.
+Actions run in order through `runActions` (`index.ts`). If `StartCall` throws, the brain receives `CallEvent` `ended_unresolved` and answers with a text check-in (never a contact alert). When no call transport is configured the brain doesn't emit `StartCall` at all and replies by text instead.
+
+Voice notes (`voice` content or audio attachments) are saved to `data/voice-notes/`, transcribed with ElevenLabs Scribe (macOS `afconvert` → WAV fallback), recorded in `voice_notes`, and dispatched as `UserText` with `voiceNote` set, so they go through exactly the same pipeline as typed text. Shared Apple Maps places (rich links) are flattened to their URL.
 
 ### State machine
 
@@ -95,12 +118,13 @@ stateDiagram-v2
   WALKING --> CHECKING_IN: soft or urgent check-in
   CHECKING_IN --> WALKING: thumbs up or ok text
   CHECKING_IN --> ALERTED: no reply, policy CONTACT_TRUSTED
-  CHECKING_IN --> CALLING: no reply, policy CALL_USER / CALL_THEN_CONTACT
   ALERTED --> WALKING: thumbs up or ok text
-  WALKING --> CALLING: emphasize or call me
-  CHECKING_IN --> CALLING: emphasize or help
-  CALLING --> WALKING: resolved safe, or ended with nothing pending
-  CALLING --> ALERTED: ended unresolved / no answer, contact step pending
+  WALKING --> CALLING: question mark or call me (opt-in only)
+  CHECKING_IN --> CALLING: question mark or call me
+  WALKING --> ALERTED: immediate danger (911 guidance + emergency alert)
+  CHECKING_IN --> ALERTED: immediate danger
+  CALLING --> WALKING: resolved safe
+  CALLING --> CHECKING_IN: ended unresolved / missed (text check-in, no alert)
   WALKING --> ARRIVED: near home
   CHECKING_IN --> ARRIVED: near home
   WALKING --> ENDED_ELSEWHERE: friend stop
@@ -129,15 +153,18 @@ src/
     onboarding.ts  # deterministic onboarding + settings router (confirm before save)
     parse.ts       # keyword parsers (contact, choices, yes/no, durations, intents)
     copy.ts        # every onboarding / settings string
+    alertDelivery.ts # text → audio → transcript delivery + truthful user notices
   locations/       # im.locations watch → LocationPing
-  voice/           # placeCall (ElevenLabs Twilio outbound); tool routes live in index.ts
-  store/           # schema.sql, Tiger client, baselines / known stops / usual cells
-  brain/           # ping window, state machine, rules, timers, walk-plan builder
-  llm/             # writeMessages(plan), parseReply(text) — NOT imported by ping rules
+  voice/           # calls (ElevenLabs / Vonage bridge / tap-to-talk), transcribe.ts (Scribe), notes.ts (voice-note ingest)
+  nav/             # NavProvider (fixture.ts + fixtures.json, geoapify.ts), service.ts (routes, reroute, safe places)
+  store/           # schema.sql, Tiger client, baselines / known stops / usual cells, voiceNotes.ts
+  brain/           # ping window, state machine, rules, timers, walk-plan builder, applyIntent
+  llm/             # writeMessages(plan), classify(text) → SafetyIntent — NOT imported by ping rules
   sim/             # GPS route playback, clock override, seed (2 weeks), live.ts (real-time feed)
   scripts/         # migrate, seed-history, sim-live, events-tail, send-test
   dashboard/       # L5 only; reads events
   index.ts         # PROVIDER=terminal|imessage; HTTP /health, /tools/* (+ /dev/sim with DEV_SIM=1); 30 s ticker
+tests/             # bun test suite (`bun run test`): parity, danger, contact payload, calls, nav, voice notes, copy
 Dockerfile         # preferred App Platform build (Bun or Node)
 .do/app.yaml       # optional App Platform spec
 ```
@@ -321,13 +348,17 @@ export interface WalkPlan {
 
 // --- LLM (not on ping path) ---
 
-export interface ParsedReply {
-  status: "ok" | "help" | "unclear";
-  placeLabel?: string;
-}
+export type SafetyIntent =
+  | { kind: "safe"; placeLabel?: string }
+  | { kind: "uneasy"; detail?: string; wants?: RouteChoice; lost?: boolean }
+  | { kind: "call"; reason?: CallReason }
+  | { kind: "danger"; clear: boolean; quote?: string; wantsCall?: boolean }
+  | { kind: "route_choice"; choice: RouteChoice }
+  | { kind: "unclear" };
 
 export type WriteMessages = (plan: WalkPlan) => Promise<Record<string, string>>;
-export type ParseReply = (text: string) => Promise<ParsedReply>;
+/** Typed text or a voice-note transcript → SafetyIntent. */
+export type ClassifyInput = (text: string) => Promise<SafetyIntent>;
 ```
 
 ### User settings (`src/shared/settings.ts`)
@@ -336,7 +367,7 @@ Set during onboarding or by texting later; read by the brain through `UserRecord
 
 ```ts
 export type MonitoringMode = "MANUAL" | "EVENINGS" | "AWAY_FROM_HOME";
-export type NoResponseAction = "CALL_USER" | "CONTACT_TRUSTED" | "CALL_THEN_CONTACT" | "NONE";
+export type NoResponseAction = "CONTACT_TRUSTED" | "NONE";
 
 export interface TrustedContact { name?: string; phone: string /* E.164 */ }
 
@@ -361,7 +392,7 @@ export interface UserSettings {
 }
 ```
 
-`escalationSteps(action)` expands an action into ordered steps (`CALL_THEN_CONTACT` → call, then contact). Calls go out through ElevenLabs when `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` and `ELEVENLABS_AGENT_PHONE_NUMBER_ID` are set; otherwise a `StartCall` counts as a failed call. Defaults when a setting is missing: monitoring behaves as `EVENINGS`; escalation is `CONTACT_TRUSTED` if a contact exists, else `NONE`.
+Legacy values are migrated: `CALL_THEN_CONTACT` → `CONTACT_TRUSTED`, `CALL_USER` → `NONE` (`normalizeNoResponseAction`, plus an UPDATE in `schema.sql`). Calls are never an escalation step. Defaults when a setting is missing: monitoring behaves as `EVENINGS`; escalation is `CONTACT_TRUSTED` if a contact exists, else `NONE`.
 
 ---
 
@@ -373,7 +404,8 @@ Full SQL provided separately; paste into `src/store/schema.sql`.
   - Settings columns (added with `ADD COLUMN IF NOT EXISTS`): `trusted_name`, `monitoring_mode`, `escalation_on_no_response`, `nudge_after_sec`, `escalate_after_sec`, `no_update_min`, `onboarded_at`.
   - `contact` is the trusted contact's phone.
 - `location_pings` hypertable `(time, user_id, lat, lon, accuracy_m, geom, cell, walk_id)`
-- `walks(walk_id, user_id, trigger, started_at, ended_at, origin_cell, duration_s, status)`. `trigger` is `prompt` / `walk_me_home` / `watch` (opened by a passive check) / `call_me` / `help`.
+- `walks(walk_id, user_id, trigger, started_at, ended_at, origin_cell, duration_s, status, safety_state, route_choice, dest_name, dest_lat, dest_lon, dest_address, interim_name, interim_lat, interim_lon)`. `trigger` is `prompt` / `walk_me_home` / `watch` (opened by a passive check) / `call_me` / `help`. Recent statements stay in memory + `events`.
+- `voice_notes(id, user_id, walk_id, received_at, path, mime_type, transcript, status, forwarded_at)`: inbound voice notes; audio files live in `data/voice-notes/` (git-ignored).
 - `confirmed_cells(user_id, cell, created_at)`: off-route stretches the user confirmed; part of their usual route from then on.
 - `stops(...)`, `place_labels(...)`, `events` hypertable `(..., rule_id, detail jsonb)`
 - `presence_hourly` CAGG; views `walk_baselines` (p50/p90 by origin), `known_stops`
@@ -400,10 +432,11 @@ Full SQL provided separately; paste into `src/store/schema.sql`.
 | R7b | > late+10 min: urgent |
 | R8 | No location update for `noUpdateMin` (default 3) while walking, or passive: check-in. Timer-driven; once per silence. No reply: R10 escalation (**floor**) |
 | R9a | 👍 to check-in (or after an alert): resume; no check-in for 10 min |
-| R9b | Free text → Gemini / regex: ok (save place label; confirms off-route) \| help (call + alert contact) \| unclear ("Didn't catch that", timers keep running) |
-| R10 | No reply `nudgeAfterSec` (60): nudge; +`escalateAfterSec` (60): the user's `onNoTextResponse`. `CONTACT_TRUSTED` → alert contact with location; `CALL_USER` / `CALL_THEN_CONTACT` → `StartCall`; `CALL_THEN_CONTACT` then alerts the contact unless the call resolves safe: `ended_unresolved` (including a call that couldn't be placed), `request_escalation`, or no outcome within `escalateAfterSec` → alert now; `started` only postpones it (15 min guard for a lost outcome event); `resolved_safe` or a 👍 / ok reply cancels it. `request_escalation` on any call (including ‼️ / "call me") alerts the contact; `NONE` → one final nudge, then stop (**floor**). The nudge tells the user their next step and its timing |
-| R11 | ‼️ or "call me": ElevenLabs call immediately (**floor**) |
-| R12 | ❓ → nearest open place (extension / L5 only) |
+| R9b | Text / voice note / tapback → `SafetyIntent` (see Safety model): safe (save place label; confirms off-route) \| uneasy \| call \| danger (clear → 911 + emergency alert; ambiguous → confirm) \| route choice \| unclear (options spelled out, timers keep running) |
+| R10 | No reply `nudgeAfterSec` (60): nudge; +`escalateAfterSec` (60): the user's `onNoTextResponse`. `CONTACT_TRUSTED` → alert contact with name, number and location; `NONE` → one final nudge, then stop (**floor**). Never a call. The nudge tells the user their next step and its timing |
+| R11 | ❓ or "call me": opt-in voice companion call (text reply instead when calls aren't configured). Call outcomes: `resolved_safe` → walking; `request_escalation` → immediate danger; `ended_unresolved` → text check-in only |
+| R12 | Uneasy → "busier" → up to 3 open places from the nav provider |
+| R17 | Destination shared (Apple Maps link / coordinates / "heading to X"), or busier stop picked; arrival acknowledged |
 | R14 | Within 50 m of home, 2 pings, on a walk (or passive after ≥2 pings away): text the user "I see that you got home safe. Have a good rest!", close walk. No contact text |
 | R15 | Friend place >15 min or reply says so: end walk quietly. No contact text |
 | R16 | Max one check-in per 3 min; none while CALLING |
@@ -491,8 +524,8 @@ Each case: set clock, play points, assert phase, `events.rule_id`, and action ty
 | **R7a / R7b** | Advance past `late`, then `late + 10` |
 | **R8** | Last ping, then `tick` at +2 min → nothing; `tick` at +3 min → check-in with no new ping; later ticks don't repeat it (**floor**) |
 | **R9a** | 👍 on check-in → `WALKING`, same tag suppressed 10 min |
-| **R9b** | Stub `parseReply` for ok / help / unclear. Thrown stub → unclear template |
-| **R10** | Check-in, +60 s → nudge; +60 s → the policy: `AlertContact` (default), `StartCall` + `CALLING` for `CALL_USER` (also with 30 s / 30 s timeouts), one final nudge and silence for `NONE` (**floor**) |
+| **R9b** | `classifyFallback` for safe / uneasy / call / danger / unclear (see `tests/2-danger.test.ts`) |
+| **R10** | Check-in, +60 s → nudge; +60 s → the policy: `AlertContact` (default, also with 30 s / 30 s timeouts), one final nudge and silence for `NONE` (**floor**). Never `StartCall` |
 | **R11** | ‼️ or `call me` from `WALKING` → `StartCall` + `CALLING` before any other rule (**floor**) |
 | **R11 outcomes** | Inject `CallEvent` `request_escalation` → `AlertContact`, phase stays `CALLING`; then `ended_unresolved` → `WALKING` |
 | **R14** | Two pings inside 50 m of home → arrived text to the user, no `AlertContact`, `IDLE` |

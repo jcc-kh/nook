@@ -1,6 +1,6 @@
 import { toCell } from "../shared/cell.ts";
 import type { LocationPing, RuleId } from "../shared/types.ts";
-import type { CheckinTimeouts, MonitoringMode, NoResponseAction } from "../shared/settings.ts";
+import { normalizeNoResponseAction, type CheckinTimeouts, type MonitoringMode } from "../shared/settings.ts";
 import { query } from "./db.ts";
 import type { UserPatch, UserRecord, UserStore } from "./types.ts";
 
@@ -26,6 +26,7 @@ type UserRow = {
 };
 
 function rowToUser(r: UserRow): UserRecord {
+  const onNoTextResponse = normalizeNoResponseAction(r.escalation_on_no_response);
   const timeouts: CheckinTimeouts = {
     ...(r.nudge_after_sec != null ? { nudgeAfterSec: r.nudge_after_sec } : {}),
     ...(r.escalate_after_sec != null ? { escalateAfterSec: r.escalate_after_sec } : {}),
@@ -46,12 +47,7 @@ function rowToUser(r: UserRow): UserRecord {
       ? { phone: r.contact, ...(r.trusted_name ? { name: r.trusted_name } : {}) }
       : undefined,
     monitoringMode: (r.monitoring_mode as MonitoringMode | null) ?? undefined,
-    escalation: r.escalation_on_no_response
-      ? {
-          initialAction: "TEXT_USER",
-          onNoTextResponse: r.escalation_on_no_response as NoResponseAction,
-        }
-      : undefined,
+    escalation: onNoTextResponse ? { initialAction: "TEXT_USER", onNoTextResponse } : undefined,
     timeouts: Object.keys(timeouts).length ? timeouts : undefined,
   };
 }

@@ -5,7 +5,25 @@
 
 export type MonitoringMode = "MANUAL" | "EVENINGS" | "AWAY_FROM_HOME";
 
-export type NoResponseAction = "CALL_USER" | "CONTACT_TRUSTED" | "CALL_THEN_CONTACT" | "NONE";
+/**
+ * What happens when a check-in can't confirm the user is okay. Calling is never
+ * an escalation step: calls are an opt-in companion mode the user asks for.
+ */
+export type NoResponseAction = "CONTACT_TRUSTED" | "NONE";
+
+/** Stored values from before calls were removed from escalation. */
+export function normalizeNoResponseAction(raw: string | null | undefined): NoResponseAction | undefined {
+  switch (raw) {
+    case "CONTACT_TRUSTED":
+    case "CALL_THEN_CONTACT":
+      return "CONTACT_TRUSTED";
+    case "NONE":
+    case "CALL_USER":
+      return "NONE";
+    default:
+      return undefined;
+  }
+}
 
 export interface TrustedContact {
   name?: string;
@@ -66,25 +84,6 @@ export interface UserSettings {
   trustedContact?: TrustedContact;
   escalation?: EscalationPolicy;
   timeouts?: CheckinTimeouts;
-}
-
-export type EscalationStep = "CALL_USER" | "CONTACT_TRUSTED";
-
-/**
- * Ordered steps for a no-response policy. Each step runs
- * only if the user still hasn't responded to the previous one.
- */
-export function escalationSteps(action: NoResponseAction): EscalationStep[] {
-  switch (action) {
-    case "CALL_USER":
-      return ["CALL_USER"];
-    case "CONTACT_TRUSTED":
-      return ["CONTACT_TRUSTED"];
-    case "CALL_THEN_CONTACT":
-      return ["CALL_USER", "CONTACT_TRUSTED"];
-    case "NONE":
-      return [];
-  }
 }
 
 /** What Nook has picked up about a user's routine. Empty until learning exists. */

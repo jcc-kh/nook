@@ -6,7 +6,8 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "smoke": "bun run src/smoke.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "test": "USE_GEMINI=0 bun test tests",
     "db:migrate": "bun run src/scripts/migrate.ts",
     "seed:user": "bun run src/scripts/seed-user.ts",
     "user:reset": "bun run src/scripts/reset-user.ts",

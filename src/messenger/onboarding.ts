@@ -9,8 +9,9 @@ import {
   type TimeoutKey,
   type TrustedContact,
 } from "../shared/settings.ts";
-import type { Clock, Event, SendTextTag } from "../shared/types.ts";
+import type { Clock, Event, SendTextTag, VoiceNoteRef } from "../shared/types.ts";
 import type { UserPatch, UserRecord, UserStore } from "../store/index.ts";
+import type { InboundVoiceNote, IngestedVoiceNote } from "../voice/notes.ts";
 import { copy, escalationOptions, learnedSummary, monitoringOptions } from "./copy.ts";
 import {
   escalationKeyword,
@@ -69,6 +70,7 @@ type Pending =
 
 type AskPending = Extract<Pending, { kind: "ask" }>;
 type TextInbound = Extract<Inbound, { kind: "text" }>;
+type VoiceInbound = Extract<Inbound, { kind: "voice" }>;
 
 const TRACKED_TAGS: SendTextTag[] = ["prompt", "started", "checkin", "nudge", "arrived", "ended"];
 
@@ -80,6 +82,8 @@ export interface RouterDeps {
   dispatch: (event: Event) => Promise<void>;
   /** Routine learning isn't built yet; plug a Tiger-backed source in here later. */
   learned?: (userId: string) => Promise<LearnedRoutine | null>;
+  /** Saves + transcribes an inbound voice note. Without it, voice notes reach the brain untranscribed. */
+  ingestVoiceNote?: (note: InboundVoiceNote) => Promise<IngestedVoiceNote>;
 }
 
 export function createInboundRouter(deps: RouterDeps) {
@@ -420,8 +424,48 @@ export function createInboundRouter(deps: RouterDeps) {
     });
   }
 
+  /** Voice notes go through the same safety pipeline as text, with the original audio kept. */
+  async function handleVoice(msg: VoiceInbound) {
+    const user = await fresh(msg.user);
+    if (!user.onboardedAt) {
+      await reply(user, copy.voiceNoteOnboarding);
+      return;
+    }
+    let text = "";
+    let voiceNote: VoiceNoteRef | undefined;
+    if (deps.ingestVoiceNote) {
+      try {
+        const got = await deps.ingestVoiceNote({
+          messageId: msg.messageId,
+          userId: user.userId,
+          mimeType: msg.mimeType,
+          ...(msg.name && { name: msg.name }),
+          read: msg.read,
+        });
+        text = got.transcript;
+        voiceNote = got.ref;
+      } catch (err) {
+        console.error(`[onboarding] voice note ingest failed for ${user.userId}`, err);
+      }
+    }
+    log(user, `voice note ${msg.messageId}: ${voiceNote?.transcribed ? JSON.stringify(text) : "(no transcript)"}`);
+    await dispatch({
+      type: "UserText",
+      userId: user.userId,
+      messageId: msg.messageId,
+      text,
+      time: clock.now(),
+      ...(voiceNote && { voiceNote }),
+    });
+  }
+
   async function route(msg: Inbound): Promise<void> {
     chatIds.set(msg.user.userId, msg.chatId);
+    if (msg.kind === "voice") {
+      const blankUser = !msg.user.onboardedAt && !msg.user.trustedContact && !pending.has(msg.user.userId);
+      if (msg.isNewUser || blankUser) return welcome(msg);
+      return handleVoice(msg);
+    }
     if (msg.kind === "reaction") {
       if (msg.isNewUser) return welcome(msg);
       const uid = msg.user.userId;

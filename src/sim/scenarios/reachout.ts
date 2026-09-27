@@ -2,7 +2,7 @@
  * Local reach-out demo: prints whether/when the brain texts the user.
  *
  * Primary ack path is iMessage tapbacks (CONTEXT R9a: 👍 resumes walk).
- * Free-text parseReply (R9b / Gemini) is shown only as a side check.
+ * Free-text classify (R9b / Gemini) is shown only as a side check.
  *
  *   bun run sim:reachout
  *   USE_GEMINI=0 bun run sim:reachout
@@ -61,7 +61,7 @@ async function runPass(label: string, useGemini: boolean) {
   const brain = createBrainEngine({
     clock,
     getUser,
-    parseReply: llm.parseReply,
+    classify: llm.classify,
     writeMessages: llm.writeMessages,
     persist: false,
     verbose: true,
@@ -166,13 +166,13 @@ async function runPass(label: string, useGemini: boolean) {
   logActions("another 61s (expect alert)", actions);
 
   // --- R9b side check: free-text only when they type instead of reacting ---
-  console.log("\n  --- R9b free-text parseReply (only if user texts, not tapback) ---");
+  console.log("\n  --- R9b free-text classify (only if user texts, not tapback) ---");
   for (const sample of [
     "HELP someone is following me",
     "staying at Sam's tonight",
     "asdfgh",
   ]) {
-    const parsed = await llm.parseReply(sample);
+    const parsed = await llm.classify(sample);
     console.log(`  text: "${sample}" →`, parsed);
   }
 }

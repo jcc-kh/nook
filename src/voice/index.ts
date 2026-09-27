@@ -2,11 +2,11 @@ import type { StartCall } from "../shared/types.ts";
 import { vonageConfigFromEnv, type VonageConfig } from "./vonage.ts";
 
 /**
- * Voice check-ins through an ElevenLabs agent: a phone call (Twilio number
- * imported into ElevenLabs, or Vonage bridged in ./vonage.ts), or a "tap to
- * talk" link opened in the browser (see ./talk.ts). The agent reports back through POST /tools/location
- * and /tools/call-outcome (see src/index.ts), using `user_id` / `walk_id` from
- * the dynamic variables.
+ * Hands-free voice companion through an ElevenLabs agent, started only when the
+ * user asks: a phone call (Twilio number imported into ElevenLabs, or Vonage
+ * bridged in ./vonage.ts), or a "tap to talk" link opened in the browser (see
+ * ./talk.ts). The agent uses the /tools/* webhooks (see src/index.ts) with
+ * `user_id` / `walk_id` from the dynamic variables.
  */
 
 const API = "https://api.elevenlabs.io/v1/convai";
@@ -45,13 +45,23 @@ export function callMode(cfg: VoiceConfig | null): "phone" | "vonage" | "link" |
 }
 
 export function callVariables(action: StartCall, contactName?: string): Record<string, string | number> {
+  const v = action.vars;
+  const name = v.displayName && v.displayName !== "friend" ? v.displayName : undefined;
   return {
     user_id: action.userId,
     walk_id: action.walkId,
-    display_name: action.vars.displayName,
-    street: action.vars.street,
-    minutes_walking: Math.round(action.vars.minutesWalking),
+    display_name: v.displayName,
+    street: v.street,
+    minutes_walking: Math.round(v.minutesWalking),
     contact_name: contactName ?? "none saved",
+    call_reason: v.callReason ?? "manual_call",
+    safety_state: v.safetyState ?? "safe",
+    destination_name: v.destinationName ?? "not set",
+    route_choice: v.routeChoice ?? "none",
+    recent_context: v.recentContext ?? "nothing yet",
+    lat: v.lat != null ? v.lat.toFixed(5) : "unknown",
+    lon: v.lon != null ? v.lon.toFixed(5) : "unknown",
+    opening_line: v.openingLine ?? (name ? `Hey ${name}, I'm here. You okay right now?` : "Hey, I'm here. You okay right now?"),
   };
 }
 

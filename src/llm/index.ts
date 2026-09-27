@@ -1,17 +1,18 @@
-import type { ParseReply, WriteMessages } from "../shared/types.ts";
+import type { ClassifyInput, WriteMessages } from "../shared/types.ts";
 import { createGeminiClient } from "./gemini.ts";
-import { parseReplyFallback, writeMessagesFallback } from "./fallback.ts";
+import { classifyFallback, writeMessagesFallback } from "./fallback.ts";
 
-export { parseReplyFallback, writeMessagesFallback } from "./fallback.ts";
+export { classifyFallback, writeMessagesFallback } from "./fallback.ts";
+export { reactionIntent } from "./classify.ts";
 
 /**
- * LLM craft/parse. Never imported from the location-ping rule path except via
- * injected parseReply / writeMessages dependencies on the brain.
+ * LLM craft/classify. Never imported from the location-ping rule path except via
+ * injected classify / writeMessages dependencies on the brain.
  */
 
 export interface Llm {
   writeMessages: WriteMessages;
-  parseReply: ParseReply;
+  classify: ClassifyInput;
   /** True when Gemini is active (API key present and USE_GEMINI !== "0"). */
   useGemini: boolean;
 }
@@ -29,20 +30,12 @@ export function createLlm(opts?: { useGemini?: boolean }): Llm {
     const key = process.env.GEMINI_API_KEY?.trim();
     if (!key) {
       console.warn("[llm] USE_GEMINI requested but GEMINI_API_KEY missing — templates only");
-      return {
-        writeMessages: writeMessagesFallback,
-        parseReply: parseReplyFallback,
-        useGemini: false,
-      };
+      return { writeMessages: writeMessagesFallback, classify: classifyFallback, useGemini: false };
     }
     console.log("[llm] Gemini enabled");
     const client = createGeminiClient(key);
     return { ...client, useGemini: true };
   }
   console.log("[llm] templates + regex fallback (Gemini off)");
-  return {
-    writeMessages: writeMessagesFallback,
-    parseReply: parseReplyFallback,
-    useGemini: false,
-  };
+  return { writeMessages: writeMessagesFallback, classify: classifyFallback, useGemini: false };
 }

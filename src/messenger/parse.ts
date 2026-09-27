@@ -7,6 +7,9 @@ export const LOC_RE = /^\/loc\s+(-?\d+(?:\.\d+)?)[\s,]+(-?\d+(?:\.\d+)?)\s*$/i;
 const SETTINGS_RE = /^\s*(my\s+|nook\s+)?settings\s*[?.!]?\s*$/i;
 const LEARNED_RE = /\b(what (have|did) you learn(ed)?|learned about me|what do you know about me)\b/i;
 const CANCEL_RE = /^\s*(cancel|never ?mind|forget it|stop)\b/i;
+/** Words after "call me" that make it a call request, not a new name. */
+const CALL_REQUEST_WORDS =
+  /^(now|please|pls|plz|asap|rn|back|again|when|if|right|later|nook|maybe|quick|real quick|i|im|i'm|someone|there|so|and|because|pleaseee)\b/i;
 const PHONE_RE = /\+?\d[\d\s().-]{5,}\d/;
 
 /** NANP: area code and exchange both start 2-9 (so 000-, 1xx- and 911-style strings fail). */
@@ -106,6 +109,65 @@ export function parseContact(text: string): { contact?: TrustedContact; sawNumbe
   return { contact: name ? { name, phone } : { phone }, sawNumber: true };
 }
 
+export interface MapsLink {
+  url: string;
+  name?: string;
+  lat?: number;
+  lon?: number;
+  address?: string;
+  /** maps.apple short link: needs a redirect lookup we don't do yet. */
+  short?: boolean;
+}
+
+const MAPS_URL_RE = /https?:\/\/(?:maps\.apple\.com|maps\.apple|(?:www\.)?apple\.co\/maps)[^\s<>"]*/i;
+const COORD_RE = /(-?\d{1,2}\.\d{3,})\s*,\s*(-?\d{1,3}\.\d{3,})/;
+
+function coords(raw: string | null | undefined): { lat: number; lon: number } | undefined {
+  const m = raw?.match(COORD_RE);
+  if (!m) return undefined;
+  const lat = Number(m[1]);
+  const lon = Number(m[2]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return undefined;
+  return { lat, lon };
+}
+
+/**
+ * An Apple Maps link in a message: place links (`?q=&ll=`, `/place?coordinate=&name=`),
+ * directions (`?daddr=`, `/directions?destination=`) and address links.
+ * Short `maps.apple/p/…` links are flagged, not resolved.
+ */
+export function parseMapsLink(text: string): MapsLink | null {
+  const raw = text.match(MAPS_URL_RE)?.[0]?.replace(/[).,!?]+$/, "");
+  if (!raw) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase();
+  const q = (k: string) => url.searchParams.get(k)?.trim() || undefined;
+  if (host !== "maps.apple.com" && !url.search) return { url: raw, short: true };
+
+  const dest = q("daddr") ?? q("destination");
+  const point = coords(q("coordinate")) ?? coords(dest) ?? coords(q("ll")) ?? coords(q("sll")) ?? coords(q("center"));
+  const destText = dest && !coords(dest) ? dest : undefined;
+  const name = q("name") ?? q("q") ?? destText;
+  const address = q("address") ?? destText;
+  if (!point && !name && !address) return host === "maps.apple.com" ? null : { url: raw, short: true };
+  return {
+    url: raw,
+    ...(name && { name }),
+    ...(point && point),
+    ...(address && { address }),
+  };
+}
+
+/** Bare "40.80521, -73.96510" in a message. */
+export function parseCoordinates(text: string): { lat: number; lon: number } | undefined {
+  return coords(text);
+}
+
 /** A menu answer: "2", "2.", "option 2", or a keyword fallback. */
 export function parseChoice<T>(
   text: string,
@@ -131,15 +193,12 @@ export function monitoringKeyword(t: string): MonitoringMode | undefined {
 export function escalationKeyword(contactName?: string) {
   return (text: string): NoResponseAction | undefined => {
     const t = text.replace(/\bif (i|you) (still )?(don't|dont|do not) (respond|answer|reply)\b/g, "");
-    const call = /\bcall\b/.test(t);
-    const both = /\bboth\b/.test(t);
     const contact =
-      /\b(contact|reach|alert|trusted)\b/.test(t) ||
+      /\b(contact|reach|alert|trusted|text (them|her|him|my))\b/.test(t) ||
       (contactName !== undefined && t.includes(contactName.toLowerCase()));
+    const keepChecking = /\b(keep checking|check in again|just check|checking in)\b/.test(t);
     const negated = /\b(don't|dont|do not|never|nothing|none|nobody|no one|no)\b/.test(t);
-    if (negated) return !call && !both ? "NONE" : undefined;
-    if (both || (call && contact)) return "CALL_THEN_CONTACT";
-    if (call) return "CALL_USER";
+    if (negated || keepChecking) return contact && !negated ? undefined : "NONE";
     if (contact) return "CONTACT_TRUSTED";
     return undefined;
   };
@@ -192,9 +251,15 @@ export function parseIntent(text: string): Intent | null {
   if (SETTINGS_RE.test(text)) return { kind: "settings" };
   if (LEARNED_RE.test(text)) return { kind: "learned" };
   const t = normalize(text);
-  if (/\b(change|update|set|fix) (my |me )?name\b|^my name is\b|^call me\b/.test(t)) {
+  if (/\b(change|update|set|fix) (my |me )?name\b|^my name is\b/.test(t)) {
     const name = parseOwnName(text);
     return name ? { kind: "name", name } : { kind: "name" };
+  }
+  // "call me Alex" renames; "call me", "call me now", "call me i'm lost" ask for a call.
+  if (/^call me\b/.test(t)) {
+    const name = parseOwnName(text);
+    if (name && !CALL_REQUEST_WORDS.test(name)) return { kind: "name", name };
+    return null;
   }
   if (/\btimings?\b|\btimeouts?\b|\bhow long\b|\bwait (longer|less)\b/.test(t)) {
     return { kind: "timing" };

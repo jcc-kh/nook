@@ -7,7 +7,7 @@ import { createBrainEngine } from "../../brain/engine.ts";
 import { closePool, query } from "../../store/db.ts";
 import { upsertDemoUser } from "../../store/users.ts";
 import { DEMO, DEMO_BODEGA, DEMO_FRIEND, DEMO_ORIGIN } from "../demo.ts";
-import { parseReplyFallback } from "../../llm/index.ts";
+import { classifyFallback } from "../../llm/fallback.ts";
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
@@ -49,7 +49,7 @@ async function main() {
   const brain = createBrainEngine({
     clock,
     getUser,
-    parseReply: parseReplyFallback,
+    classify: classifyFallback,
     persist: true,
   });
 
@@ -120,7 +120,7 @@ async function main() {
   const brain2 = createBrainEngine({
     clock,
     getUser,
-    parseReply: parseReplyFallback,
+    classify: classifyFallback,
     persist: true,
   });
   clock.set(new Date(night().getTime() + 3600_000));
@@ -155,7 +155,7 @@ async function main() {
     lon: DEMO_ORIGIN.lon + 0.01,
   });
   assert(
-    a6.some((a) => a.type === "SendText" && a.text.includes("usual route")),
+    a6.some((a) => a.type === "SendText" && a.text.includes("usual way")),
     "R6: expected off-route checkin (run seed:history first)",
   );
   console.log("R6 ok");
