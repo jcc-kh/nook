@@ -106,7 +106,7 @@ export const copy = {
 
   offerCode:
     "Want a discreet emergency word? If you send or say it, I'll skip the normal check-in and immediately take the action you choose.\n\nReply yes or no.",
-  askCodePhrase: "What should it be? Pick a word you wouldn't normally text, like tiramisu.",
+  askCodePhrase: "What should it be? Pick a word you wouldn't normally text.",
   badCodePhrase: "Pick a word or short phrase (letters only) that you wouldn't normally text.",
   askCodeAction: (phrase: string, c?: TrustedContact) =>
     `If you send or say '${phrase}', what should I do?\n1. Call me immediately\n2. Contact ${theirs(c)} immediately\n3. Call me, then contact ${theirs(c)} if I don't respond`,
