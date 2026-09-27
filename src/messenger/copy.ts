@@ -159,6 +159,7 @@ export const copy = {
   learnedNothing:
     "i haven't learned enough about your routine yet. as you use nook, i'll gradually pick up patterns like places you visit often and routes you commonly take.",
 
+  talkLink: (url: string) => `📞 tap to talk to me now: ${url}`,
   callFailed: "i tried to call you but couldn't place the call. tap 👍 if you're okay, or text me.",
   contactAlerted: (name?: string) => `i've let ${name ?? "your trusted contact"} know and sent them your location.`,
   contactUnreachable: (name?: string) =>

@@ -4,6 +4,8 @@ import { templates } from "../shared/templates.ts";
 import { parseReplyFallback, writeMessagesFallback } from "./fallback.ts";
 
 const MODEL = process.env.GEMINI_MODEL ?? "gemini-3.5-flash-lite";
+/** The brain handles one event at a time, so a slow reply would stall every user's timers. */
+const TIMEOUT_MS = 4_000;
 
 function extractJsonObject(raw: string): unknown {
   const trimmed = raw.trim();
@@ -19,14 +21,21 @@ export function createGeminiClient(apiKey: string): {
   const ai = new GoogleGenAI({ apiKey });
 
   async function generateJson(prompt: string): Promise<unknown> {
-    const response = await ai.models.generateContent({
-      model: MODEL,
-      contents: prompt,
-      config: {
-        temperature: 0.4,
-        responseMimeType: "application/json",
-      },
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Gemini timed out after ${TIMEOUT_MS} ms`)), TIMEOUT_MS);
     });
+    const response = await Promise.race([
+      ai.models.generateContent({
+        model: MODEL,
+        contents: prompt,
+        config: {
+          temperature: 0.4,
+          responseMimeType: "application/json",
+        },
+      }),
+      timeout,
+    ]).finally(() => clearTimeout(timer));
     const text = response.text ?? "";
     if (!text.trim()) throw new Error("empty Gemini response");
     return extractJsonObject(text);

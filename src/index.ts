@@ -7,7 +7,9 @@ import { createInboundRouter } from "./messenger/onboarding.ts";
 import { createSpectrumMessenger, type Provider } from "./messenger/spectrum.ts";
 import { toE164 } from "./messenger/parse.ts";
 import { createUserStore } from "./store/index.ts";
-import { voiceConfigFromEnv } from "./voice/index.ts";
+import { callMode, voiceConfigFromEnv } from "./voice/index.ts";
+import { createTalkLinks } from "./voice/talk.ts";
+import { createVonageCalls, type BridgeSocket } from "./voice/vonage.ts";
 import { createLiveSim, SCENARIOS, type ScenarioName } from "./sim/live.ts";
 import { CALL_OUTCOMES, type Action, type Brain, type CallOutcome, type Event, type LocationPing } from "./shared/types.ts";
 
@@ -38,11 +40,34 @@ if (brainMode === "echo") {
   });
 }
 
+const voice = voiceConfigFromEnv();
+const reportCall = (userId: string, walkId: string, outcome: CallOutcome) =>
+  dispatch({ type: "CallEvent", userId, walkId, callType: outcome, time: clock.now() });
+const talkLinks =
+  voice?.publicUrl && callMode(voice) !== "phone"
+    ? createTalkLinks({ cfg: { ...voice, publicUrl: voice.publicUrl }, report: reportCall })
+    : undefined;
+const vonageCalls =
+  voice?.publicUrl && voice.vonage && callMode(voice) === "vonage"
+    ? createVonageCalls({
+        voice: { ...voice, publicUrl: voice.publicUrl },
+        vonage: voice.vonage,
+        report: reportCall,
+        onFailed: async (action, contactName) => {
+          if (!talkLinks) return reportCall(action.userId, action.walkId, "ended_unresolved");
+          console.log(`[vonage] call to ${action.userId} couldn't be placed, sending a tap-to-talk link instead`);
+          await messenger.sendToUser(action.userId, copy.talkLink(talkLinks.create(action, contactName)));
+        },
+      })
+    : undefined;
+
 const messenger = await createSpectrumMessenger({
   provider,
   users,
   projectId,
   projectSecret,
+  ...(talkLinks && { talkLinks }),
+  ...(vonageCalls && { vonageCalls }),
 });
 
 /** One failed action never drops the rest. A call that can't be placed counts as unresolved. */
@@ -183,8 +208,29 @@ async function handleTool(req: Request, url: URL): Promise<Response> {
       return Response.json({ ok: false, error: "unknown user_id" }, { status: 404 });
     }
     console.log(`[voice] ${userId} walk ${walkId}: ${outcome}`);
+    talkLinks?.noteOutcome(walkId, outcome);
+    vonageCalls?.noteOutcome(walkId, outcome);
+    const before = Date.now();
     await dispatch({ type: "CallEvent", userId, walkId, callType: outcome, time: clock.now() });
-    return Response.json({ ok: true });
+    const alert = messenger.lastContactAlert(userId);
+    if (outcome !== "request_escalation") return Response.json({ ok: true });
+    if (alert && alert.at >= before) {
+      return Response.json({
+        ok: true,
+        contact_alerted: alert.ok,
+        contact_name: alert.name ?? "their trusted contact",
+        note: alert.ok
+          ? "The trusted contact was just texted the caller's location."
+          : "The text to the trusted contact FAILED. Tell the caller honestly and have them call their contact or 911 themselves.",
+      });
+    }
+    return Response.json({
+      ok: true,
+      contact_alerted: alert?.ok ?? false,
+      note: alert?.ok
+        ? "The trusted contact was already texted earlier in this trip."
+        : "No text reached a trusted contact. Tell the caller honestly and have them call someone or 911 themselves.",
+    });
   }
 
   return new Response("not found", { status: 404 });
@@ -217,13 +263,19 @@ const ticker = setInterval(async () => {
 }, TICK_MS);
 
 console.log(
-  `[nook] ready  PROVIDER=${provider}  BRAIN_MODE=${brainMode}  PORT=${port}  DB=${process.env.DATABASE_URL ? "yes" : "no"}  GEMINI=${process.env.USE_GEMINI === "0" || !process.env.GEMINI_API_KEY ? "off" : "on"}  CALLS=${voiceConfigFromEnv() ? "on" : "off"}  DEV_SIM=${devSim ? "on" : "off"}`,
+  `[nook] ready  PROVIDER=${provider}  BRAIN_MODE=${brainMode}  PORT=${port}  DB=${process.env.DATABASE_URL ? "yes" : "no"}  GEMINI=${process.env.USE_GEMINI === "0" || !process.env.GEMINI_API_KEY ? "off" : "on"}  CALLS=${callMode(voice)}  DEV_SIM=${devSim ? "on" : "off"}`,
 );
 
-const server = Bun.serve({
+const server = Bun.serve<BridgeSocket["data"], never>({
   port,
   fetch(req, srv) {
     const url = new URL(req.url);
+    if (vonageCalls && url.pathname.startsWith("/vonage/ws/")) {
+      const data = vonageCalls.upgradeData(url);
+      if (!data) return new Response("not found", { status: 404 });
+      return srv.upgrade(req, { data }) ? undefined : new Response("upgrade failed", { status: 400 });
+    }
+    if (vonageCalls && url.pathname.startsWith("/vonage/event/")) return vonageCalls.handleEvent(req, url);
     if (devSim && url.pathname.startsWith("/dev/sim")) {
       if (!isLoopback(srv.requestIP(req)?.address)) {
         return new Response("forbidden", { status: 403 });
@@ -231,6 +283,7 @@ const server = Bun.serve({
       return handleDevSim(req, url);
     }
     if (url.pathname.startsWith("/tools/")) return handleTool(req, url);
+    if (talkLinks && url.pathname.startsWith("/talk/")) return talkLinks.handle(req, url);
     if (url.pathname === "/health") {
       return Response.json({
         ok: true,
@@ -241,6 +294,11 @@ const server = Bun.serve({
       });
     }
     return new Response("nook — see CONTEXT.md / TEAM.md", { status: 404 });
+  },
+  websocket: {
+    open: (ws) => vonageCalls?.websocket.open(ws),
+    message: (ws, message) => vonageCalls?.websocket.message(ws, message),
+    close: (ws) => vonageCalls?.websocket.close(ws),
   },
 });
 

@@ -5,6 +5,8 @@ import { templateForTag } from "../shared/templates.ts";
 import type { Action, ExecuteResult, SendTextTag } from "../shared/types.ts";
 import type { UserRecord, UserStore } from "../store/index.ts";
 import { placeCall, voiceConfigFromEnv } from "../voice/index.ts";
+import type { TalkLinks } from "../voice/talk.ts";
+import type { VonageCalls } from "../voice/vonage.ts";
 import type { Messenger } from "./index.ts";
 import { copy } from "./copy.ts";
 
@@ -29,7 +31,16 @@ export interface SpectrumMessenger extends Messenger {
   /** Untagged reply (onboarding copy). */
   sendToUser(userId: string, text: string): Promise<ExecuteResult>;
   lastMessageId(userId: string, tag: SendTextTag): string | undefined;
+  /** Whether the most recent trusted-contact alert for this user actually went out. */
+  lastContactAlert(userId: string): ContactAlertResult | undefined;
   stop(): Promise<void>;
+}
+
+export interface ContactAlertResult {
+  ok: boolean;
+  name?: string;
+  /** Epoch ms. */
+  at: number;
 }
 
 export interface SpectrumMessengerOptions {
@@ -37,6 +48,9 @@ export interface SpectrumMessengerOptions {
   users: UserStore;
   projectId?: string;
   projectSecret?: string;
+  /** Used for StartCall when there's no ElevenLabs phone number. */
+  talkLinks?: TalkLinks;
+  vonageCalls?: VonageCalls;
 }
 
 function mapsLink(lat: number, lon: number): string {
@@ -92,6 +106,7 @@ export async function createSpectrumMessenger(
   const lastIdByTag = new Map<string, Map<SendTextTag, string>>();
   /** The user's in-thread message currently being handled; our replies go into that thread. */
   const threads = new Map<string, Message>();
+  const lastAlerts = new Map<string, ContactAlertResult>();
   /** Drop identical back-to-back sends (Spectrum / reconnect weirdness). */
   const recentSend = new Map<string, { text: string; at: number }>();
   const SEND_DEDUP_MS = 8_000;
@@ -147,19 +162,25 @@ export async function createSpectrumMessenger(
     const contact = user?.trustedContact;
     if (!contact) {
       console.warn(`[messenger] AlertContact for ${userId} but no trusted contact on file:\n${body}`);
+      lastAlerts.set(userId, { ok: false, at: Date.now() });
       return;
     }
+    const record = (ok: boolean) =>
+      lastAlerts.set(userId, { ok, at: Date.now(), ...(contact.name && { name: contact.name }) });
     try {
       const space = await openDm(contact.phone);
       if (!space) {
         // Terminal has no second person to text; surface it in the log instead.
         console.log(`[messenger] → trusted contact ${contact.name ?? ""} ${contact.phone}:\n${body}`);
+        record(true);
         return;
       }
       await space.send(body);
+      record(true);
       console.log(`[messenger] alerted trusted contact ${contact.name ?? ""} ${contact.phone}`);
       await sendToUser(userId, copy.contactAlerted(contact.name)).catch(() => {});
     } catch (err) {
+      record(false);
       // e.g. Photon "Target not allowed for this project": the user must not assume someone was told.
       console.error(
         `[messenger] could NOT alert trusted contact ${contact.phone}: ${err instanceof Error ? err.message : err}`,
@@ -194,9 +215,25 @@ export async function createSpectrumMessenger(
           );
           return {};
         }
-        const conversationId = await placeCall(voice, user.handle, action);
-        console.log(`[messenger] calling ${user.handle} (walk ${action.walkId}, conversation ${conversationId ?? "?"})`);
-        return {};
+        const contactName = user.trustedContact?.name;
+        if (voice.agentPhoneNumberId) {
+          const conversationId = await placeCall(voice, user.handle, action, contactName);
+          console.log(`[messenger] calling ${user.handle} (walk ${action.walkId}, conversation ${conversationId ?? "?"})`);
+          return {};
+        }
+        if (opts.vonageCalls) {
+          try {
+            await opts.vonageCalls.start(action, user.handle, contactName);
+            return {};
+          } catch (err) {
+            if (!opts.talkLinks) throw err;
+            console.error(`[messenger] Vonage call failed, sending a tap-to-talk link instead`, err);
+          }
+        }
+        if (!opts.talkLinks) throw new Error("tap-to-talk links not set up");
+        const url = opts.talkLinks.create(action, contactName);
+        console.log(`[messenger] sent tap-to-talk link to ${user.handle} (walk ${action.walkId})`);
+        return sendToUser(action.userId, copy.talkLink(url));
       }
     }
   }
@@ -243,6 +280,7 @@ export async function createSpectrumMessenger(
     inbound,
     sendToUser,
     lastMessageId: (userId, tag) => lastIdByTag.get(userId)?.get(tag),
+    lastContactAlert: (userId) => lastAlerts.get(userId),
     stop: () => app.stop(),
   };
 }

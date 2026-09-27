@@ -12,14 +12,11 @@ export const writeMessagesFallback: WriteMessages = async () => ({
 
 /** Regex parser used when Gemini is off or fails. */
 export const parseReplyFallback: ParseReply = async (text) => {
-  const t = text.toLowerCase();
-  if (/help|emergency|scared|danger/.test(t)) return { status: "help" };
-  if (/ok|fine|good|safe|all good|i'?m good/.test(t)) {
-    return { status: "ok" };
-  }
-  if (/i'?m at |at .+|staying at/.test(t)) {
-    const m = text.match(/at\s+(.+)/i);
-    return { status: "ok", placeLabel: m?.[1]?.trim() ?? "somewhere" };
-  }
+  const plain = text.replace(/[‘’]/g, "'");
+  const t = plain.toLowerCase();
+  if (/\b(help|emergency|scared|danger|unsafe|following me|call 911)\b/.test(t)) return { status: "help" };
+  const place = plain.match(/\b(?:i'?m|i am|staying|still|just) at\s+(.+)/i)?.[1]?.replace(/[.!]+$/, "").trim();
+  if (place) return { status: "ok", placeLabel: place };
+  if (/\b(ok|okay|k|fine|good|safe|all good|yep|yes|yeah|home|here)\b/.test(t)) return { status: "ok" };
   return { status: "unclear" };
 };

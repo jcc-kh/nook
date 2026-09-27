@@ -420,6 +420,8 @@ Full SQL provided separately; paste into `src/store/schema.sql`.
 - **HTTP:** `/health` (health check), plus the ElevenLabs webhook tools, both `POST` with header `x-tools-secret: $TOOLS_SECRET` and parameters flat or under `parameters`:
   - `/tools/location` `{ walk_id }` → `getLiveContext` JSON (`street`, `lat`, `lon`, `minutesWalking`).
   - `/tools/call-outcome` `{ user_id, walk_id, outcome }` with `outcome` one of `started` / `resolved_safe` / `request_escalation` / `ended_unresolved` → `CallEvent`.
+  - `/talk/<token>` (tap to talk): used instead of a phone call when `ELEVENLABS_AGENT_PHONE_NUMBER_ID` is empty and `PUBLIC_URL` is set. `StartCall` texts the user "📞 Tap to talk to me now: <link>". The page gets a short-lived WebRTC token from our server and talks to the same agent with the same variables. Opening the conversation counts as `started`; a link not opened within 3 min, or a conversation that ends without `resolved_safe`, counts as `ended_unresolved`. Links expire after 30 min.
+  - `bun run voice:setup <public url>` creates / updates the tools and agent (and imports a Twilio number when `TWILIO_*` is set). Re-run it when the public URL changes.
   - `user_id` and `walk_id` arrive as call dynamic variables (`placeCall` sends `user_id`, `walk_id`, `display_name`, `street`, `minutes_walking`). Bind them in the agent's tool config so the model never makes them up.
 - **Secrets (env):** `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET`, Tiger connection string, `GEMINI_API_KEY`, `ELEVENLABS_API_KEY`, agent/phone ids, tools shared secret, `PROVIDER`.
 - **Public URL:** App Platform HTTPS for ElevenLabs tool webhooks. ngrok only for local L4 before first deploy.
