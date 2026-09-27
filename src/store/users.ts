@@ -9,7 +9,6 @@ type UserRow = {
   user_id: string;
   handle: string;
   contact: string | null;
-  codeword: string | null;
   home_lat: number | null;
   home_lon: number | null;
   night_start: string;
@@ -23,7 +22,6 @@ function rowToUser(r: UserRow): UserRecord {
     userId: r.user_id,
     handle: r.handle,
     contact: r.contact ?? undefined,
-    codeword: r.codeword ?? undefined,
     homeLat: r.home_lat ?? undefined,
     homeLon: r.home_lon ?? undefined,
     nightStart: String(r.night_start).slice(0, 5),
@@ -33,8 +31,9 @@ function rowToUser(r: UserRow): UserRecord {
   };
 }
 
+/** Live Tiger `users` has no codeword column; phrase lives in the settings overlay. */
 const USER_SELECT = `
-  SELECT user_id, handle, contact, codeword,
+  SELECT user_id, handle, contact,
     ST_Y(home::geometry) AS home_lat,
     ST_X(home::geometry) AS home_lon,
     night_start::text, night_end::text, tz, display_name
@@ -63,18 +62,16 @@ export function createTigerUserStore(): UserStore {
 
     async updateUser(userId: string, patch: UserPatch): Promise<void> {
       const contact = patch.trustedContact?.phone ?? patch.contact;
-      const codeword = patch.emergencyCode?.phrase ?? patch.codeword;
       const displayName = patch.displayName;
-      if (contact === undefined && codeword === undefined && displayName === undefined) {
+      if (contact === undefined && displayName === undefined) {
         return;
       }
       const res = await query(
         `UPDATE users SET
            contact = COALESCE($2, contact),
-           codeword = COALESCE($3, codeword),
-           display_name = COALESCE($4, display_name)
+           display_name = COALESCE($3, display_name)
          WHERE user_id = $1`,
-        [userId, contact ?? null, codeword ?? null, displayName ?? null],
+        [userId, contact ?? null, displayName ?? null],
       );
       if (res.rowCount === 0) throw new Error(`unknown user ${userId}`);
     },
@@ -87,12 +84,8 @@ export function createTigerUserStore(): UserStore {
       if (res.rowCount === 0) throw new Error(`unknown user ${userId}`);
     },
 
-    async setCodeword(userId: string, codeword: string): Promise<void> {
-      const res = await query(`UPDATE users SET codeword = $2 WHERE user_id = $1`, [
-        userId,
-        codeword,
-      ]);
-      if (res.rowCount === 0) throw new Error(`unknown user ${userId}`);
+    async setCodeword(_userId: string, _codeword: string): Promise<void> {
+      // No Tiger column; wrapTigerWithSettings keeps the phrase in-process.
     },
 
     async setHome(userId: string, lat: number, lon: number): Promise<void> {
@@ -125,7 +118,7 @@ export async function upsertDemoUser(user: {
   userId: string;
   handle: string;
   contact: string;
-  codeword: string;
+  codeword?: string;
   homeLat: number;
   homeLon: number;
   nightStart?: string;
@@ -134,16 +127,15 @@ export async function upsertDemoUser(user: {
   displayName?: string;
 }): Promise<void> {
   await query(
-    `INSERT INTO users (user_id, handle, contact, codeword, home, night_start, night_end, tz, display_name)
+    `INSERT INTO users (user_id, handle, contact, home, night_start, night_end, tz, display_name)
      VALUES (
-       $1, $2, $3, $4,
-       ST_SetSRID(ST_MakePoint($6, $5), 4326)::geography,
-       $7::time, $8::time, $9, $10
+       $1, $2, $3,
+       ST_SetSRID(ST_MakePoint($5, $4), 4326)::geography,
+       $6::time, $7::time, $8, $9
      )
      ON CONFLICT (user_id) DO UPDATE SET
        handle = EXCLUDED.handle,
        contact = EXCLUDED.contact,
-       codeword = EXCLUDED.codeword,
        home = EXCLUDED.home,
        night_start = EXCLUDED.night_start,
        night_end = EXCLUDED.night_end,
@@ -153,7 +145,6 @@ export async function upsertDemoUser(user: {
       user.userId,
       user.handle,
       user.contact,
-      user.codeword,
       user.homeLat,
       user.homeLon,
       user.nightStart ?? "22:00",

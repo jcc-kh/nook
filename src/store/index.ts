@@ -20,6 +20,7 @@ export {
   loadWalkBaselines,
   loadKnownStops,
   loadRouteCells,
+  loadFamiliarCells,
   buildDefaultPlan,
 } from "./walks.ts";
 

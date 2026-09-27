@@ -23,7 +23,7 @@ if (brainMode === "echo") {
   const { createBrain: createStub } = await import("./brain/stubEmpty.ts");
   brain = createStub({ clock });
 } else {
-  brain = createBrain({ clock });
+  brain = createBrain({ clock, verbose: process.env.BRAIN_LOG !== "0" });
 }
 
 const messenger = await createSpectrumMessenger({
@@ -37,6 +37,15 @@ async function dispatch(event: Event): Promise<void> {
   try {
     const actions = await brain.handle(event);
     for (const action of actions) {
+      if (action.type === "SendText") {
+        console.log(`[nook] → user ${action.userId} [${action.tag}] ${action.text}`);
+      } else if (action.type === "AlertContact") {
+        console.log(
+          `[nook] → trusted contact for ${action.userId}: ${action.text} @ ${action.lat.toFixed(5)},${action.lon.toFixed(5)}`,
+        );
+      } else if (action.type === "StartCall") {
+        console.log(`[nook] → StartCall ${action.userId} walk=${action.walkId}`);
+      }
       await messenger.execute(action);
     }
   } catch (err) {

@@ -81,7 +81,6 @@ export async function createLocations(opts: LocationsOptions): Promise<Locations
     lastActivity = Date.now();
   });
   const lastSeqByAddress = new Map<string, number>();
-  const unknownAddresses = new Set<string>();
   let stopped = false;
   let current: TypedEventStream<SharedFriendLocationUpdated> | undefined;
 
@@ -89,15 +88,19 @@ export async function createLocations(opts: LocationsOptions): Promise<Locations
     if (lastSeqByAddress.get(location.address) === sourceSequence) return;
     lastSeqByAddress.set(location.address, sourceSequence);
 
-    if (location.latitude === undefined || location.longitude === undefined) return;
-    const user = await users.getByHandle(location.address);
-    if (!user) {
-      if (!unknownAddresses.has(location.address)) {
-        unknownAddresses.add(location.address);
-        console.log(`[locations] ignoring Find My updates from ${location.address} (no user yet)`);
-      }
+    if (location.latitude === undefined || location.longitude === undefined) {
+      console.log(
+        `[locations] ${location.address} seq=${sourceSequence} no coordinates (${location.locationType})`,
+      );
       return;
     }
+    const user = await users.getByHandle(location.address);
+    const where = location.shortAddress ? ` ${location.shortAddress}` : "";
+    console.log(
+      `[locations] ${location.address} seq=${sourceSequence} ${location.latitude.toFixed(5)},${location.longitude.toFixed(5)} ±${location.accuracy ?? "?"}m ${location.locationType}${where}` +
+        (user ? ` → ${user.userId}` : " (no user)"),
+    );
+    if (!user) return;
 
     await emit(user.userId, {
       lat: location.latitude,

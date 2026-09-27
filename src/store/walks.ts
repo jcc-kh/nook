@@ -231,6 +231,18 @@ export async function loadRouteCells(
   return cells.rows.map((c) => c.cell);
 }
 
+/** All distinct cells from this user's ended walks (usual area for unfamiliar-route notice). */
+export async function loadFamiliarCells(userId: string): Promise<string[]> {
+  const res = await query<{ cell: string }>(
+    `SELECT DISTINCT lp.cell
+     FROM location_pings lp
+     JOIN walks w ON w.walk_id = lp.walk_id
+     WHERE lp.user_id = $1 AND w.ended_at IS NOT NULL`,
+    [userId],
+  );
+  return res.rows.map((r) => r.cell);
+}
+
 export function buildDefaultPlan(
   originLat: number,
   originLon: number,

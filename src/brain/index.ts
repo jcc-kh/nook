@@ -33,7 +33,7 @@ export function createBrain(opts: CreateBrainOptions): Brain & {
     parseReply: opts.parseReply ?? llm.parseReply,
     writeMessages: opts.writeMessages ?? llm.writeMessages,
     persist: opts.persist ?? true,
-    verbose: opts.verbose ?? process.env.BRAIN_LOG === "1",
+    verbose: opts.verbose ?? process.env.BRAIN_LOG !== "0",
   });
 
   return {

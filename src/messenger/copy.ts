@@ -125,6 +125,16 @@ export const copy = {
   homeNoFix:
     "I can't see your location right now. Make sure location sharing with me is on, then text 'home' again.",
 
+  greetingIdle:
+    "Hey. Text me 'walk me home' when you head out, or I'll notice if you start walking at night.",
+  greetingPrompted: "Still waiting — tap 👍 to start the walk, or 👎 if you're not heading out.",
+  greetingWalking:
+    "Still with you. Tap 👍 if you're good, or text me if you need help.",
+  idleUnclear:
+    "I can walk you home, or you can text 'settings'. I didn't catch a trip in that.",
+  unfamiliarArea:
+    "I noticed you start walking, but this is not an area you've been. Will check in with you in a bit.",
+
   confirmMonitoring: (mode: MonitoringMode) =>
     `Change monitoring to ${monitoringLabel[mode]}? Reply yes to confirm.`,
   confirmContact: (c: TrustedContact) =>

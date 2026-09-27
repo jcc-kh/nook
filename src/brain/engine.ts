@@ -24,17 +24,20 @@ import {
   buildDefaultPlan,
   getOpenWalk,
   insertWalk,
+  loadFamiliarCells,
   loadKnownStops,
   loadRouteCells,
   loadWalkBaselines,
   updateWalkStatus,
   upsertPlaceLabel,
 } from "../store/walks.ts";
+import { copy } from "../messenger/copy.ts";
 
 const WINDOW_MS = 5 * 60_000;
 const PROMPT_COOLDOWN_MS = 2 * 60 * 60_000;
 const CHECKIN_RATE_MS = 3 * 60_000;
 const STATIONARY_M = 25;
+const DEMO_FALLBACK = { lat: 40.8075, lon: -73.9626 };
 
 export type ParseReplyFn = (text: string) => Promise<ParsedReply>;
 
@@ -102,6 +105,98 @@ function emptyRuntime(): UserRuntime {
 
 function brainLog(deps: BrainDeps, ...parts: unknown[]) {
   if (deps.verbose) console.log("[brain]", ...parts);
+}
+
+function isGreeting(text: string): boolean {
+  return /^(hi|hey|hello|yo|sup)([!.?\s]*)$/i.test(text.trim());
+}
+
+function isStartIntent(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  return (
+    t.includes("walk me home") ||
+    /\bheading (out|home)\b/.test(t) ||
+    /\bwalking home\b/.test(t) ||
+    /\bon my way home\b/.test(t)
+  );
+}
+
+function isAffirmativeText(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  return /^(ok|okay|fine|good|i'?m (good|fine|ok|okay)|all good|yes)([!.?\s]*)$/i.test(t);
+}
+
+/** Unfamiliar-area notice without opening CHECKING_IN (R5b can still fire). */
+async function noticeIfUnfamiliar(
+  deps: BrainDeps,
+  rt: UserRuntime,
+  user: UserRecord,
+  originLat: number,
+  originLon: number,
+): Promise<boolean> {
+  const cell = toCell(originLat, originLon);
+  let familiar: string[] = [];
+  try {
+    familiar = await loadFamiliarCells(user.userId);
+  } catch (err) {
+    brainLog(deps, "loadFamiliarCells failed", err);
+    return false;
+  }
+  if (familiar.length === 0) {
+    brainLog(deps, "unfamiliar skipped — no ended-walk cells yet");
+    return false;
+  }
+  if (familiar.includes(cell)) {
+    brainLog(deps, `familiar cell ${cell} (${familiar.length} usual cells)`);
+    return false;
+  }
+  send(rt, user.userId, "checkin", copy.unfamiliarArea);
+  brainLog(deps, `unfamiliar notice cell=${cell} usual=${familiar.length}`);
+  return true;
+}
+
+async function escalateHelp(
+  deps: BrainDeps,
+  rt: UserRuntime,
+  user: UserRecord,
+  now: Date,
+  source: string,
+) {
+  if (!rt.walkId) {
+    const last = rt.pings[rt.pings.length - 1];
+    await beginWalk(
+      deps,
+      rt,
+      user,
+      now,
+      "help",
+      last?.lat ?? user.homeLat ?? DEMO_FALLBACK.lat,
+      last?.lon ?? user.homeLon ?? DEMO_FALLBACK.lon,
+    );
+  }
+  rt.phase = "CALLING";
+  const last = rt.pings[rt.pings.length - 1];
+  startCall(rt, user.userId, rt.walkId!, {
+    displayName: user.displayName ?? "friend",
+    street: rt.lastShortAddress ?? "nearby",
+    minutesWalking: rt.walkStartedAt
+      ? (now.getTime() - rt.walkStartedAt.getTime()) / 60000
+      : 0,
+    walkId: rt.walkId!,
+  });
+  alert(
+    rt,
+    user.userId,
+    templates.alertContactHelp,
+    last?.lat ?? user.homeLat ?? 0,
+    last?.lon ?? user.homeLon ?? 0,
+  );
+  brainLog(deps, `parseReply → help escalate=contact source=${source}`);
+  await logRule(deps, user.userId, "R9b", rt.walkId, {
+    status: "help",
+    escalate: "contact",
+    source,
+  });
 }
 
 function isNight(now: Date, user: UserRecord): boolean {
@@ -458,7 +553,11 @@ export function createBrainEngine(deps: BrainDeps) {
     }
 
     if (event.type === "UserText") {
-      const lower = event.text.trim().toLowerCase();
+      const raw = event.text.trim();
+      const lower = raw.toLowerCase();
+      brainLog(deps, `text phase=${rt.phase}`, JSON.stringify(raw.slice(0, 80)));
+
+      // Floors: call me (does not text contact unless also classified help)
       if (lower === "call me" || lower.includes("call me")) {
         if (!rt.walkId) {
           const last = rt.pings[rt.pings.length - 1];
@@ -485,110 +584,130 @@ export function createBrainEngine(deps: BrainDeps) {
         return rt.pendingActions;
       }
 
-      // R4
-      if (lower.includes("walk me home")) {
-        const last = rt.pings[rt.pings.length - 1];
-        await beginWalk(
-          deps,
-          rt,
-          user,
-          now,
-          "walk_me_home",
-          last?.lat ?? user.homeLat ?? DEMO_FALLBACK.lat,
-          last?.lon ?? user.homeLon ?? DEMO_FALLBACK.lon,
-        );
-        await logRule(deps, user.userId, "R4", rt.walkId);
+      // Greeting — never a check-in
+      if (isGreeting(raw)) {
+        brainLog(deps, "intent=greeting skip R9b");
+        if (rt.phase === "PROMPTED") {
+          send(rt, user.userId, "prompt", copy.greetingPrompted);
+        } else if (rt.phase === "WALKING" || rt.phase === "CHECKING_IN") {
+          send(rt, user.userId, "nudge", copy.greetingWalking);
+        } else {
+          send(rt, user.userId, "prompt", copy.greetingIdle);
+        }
         return rt.pendingActions;
       }
 
-      // R3 / R9a reactions via text not needed; free text R9b during check-in or walking
-      if (rt.phase === "CHECKING_IN" || rt.phase === "WALKING") {
-        const parse = deps.parseReply ?? (async () => ({ status: "unclear" as const }));
-        let parsed: ParsedReply;
-        try {
-          parsed = await parse(event.text);
-        } catch {
-          parsed = { status: "unclear" };
-          send(rt, user.userId, "nudge", copyFor(rt, "unclear"));
-          await logRule(deps, user.userId, "R9b", rt.walkId, { status: "unclear", error: true });
+      // Start intent (R4) — even while standing still
+      if (isStartIntent(raw)) {
+        const last = rt.pings[rt.pings.length - 1];
+        const originLat = last?.lat ?? user.homeLat ?? DEMO_FALLBACK.lat;
+        const originLon = last?.lon ?? user.homeLon ?? DEMO_FALLBACK.lon;
+        await beginWalk(deps, rt, user, now, "walk_me_home", originLat, originLon);
+        await logRule(deps, user.userId, "R4", rt.walkId);
+        await noticeIfUnfamiliar(deps, rt, user, originLat, originLon);
+        return rt.pendingActions;
+      }
+
+      // Affirmative text only resolves check-in / prompt (👍 path for text)
+      if (isAffirmativeText(raw) && (rt.phase === "CHECKING_IN" || rt.phase === "PROMPTED")) {
+        brainLog(deps, "intent=ok (affirmative text)");
+        if (rt.phase === "PROMPTED") {
+          const last = rt.pings[rt.pings.length - 1];
+          const originLat = last?.lat ?? user.homeLat ?? 0;
+          const originLon = last?.lon ?? user.homeLon ?? 0;
+          await beginWalk(deps, rt, user, now, "prompt", originLat, originLon);
+          await logRule(deps, user.userId, "R3", rt.walkId, { reply: "text_ok" });
+          await noticeIfUnfamiliar(deps, rt, user, originLat, originLon);
           return rt.pendingActions;
         }
-        await logRule(deps, user.userId, "R9b", rt.walkId, { status: parsed.status });
-        if (parsed.status === "ok") {
-          if (parsed.placeLabel && rt.pings.length) {
-            const last = rt.pings[rt.pings.length - 1]!;
-            if (deps.persist !== false) {
-              try {
-                await upsertPlaceLabel({
-                  userId: user.userId,
-                  cell: toCell(last.lat, last.lon),
-                  lat: last.lat,
-                  lon: last.lon,
-                  label: parsed.placeLabel,
-                  source: "user",
-                });
-              } catch {
-                /* ignore */
-              }
+        rt.phase = "WALKING";
+        rt.checkinOpenedAt = null;
+        rt.suppressCheckinUntil = new Date(now.getTime() + 10 * 60_000);
+        await logRule(deps, user.userId, "R9a", rt.walkId, { via: "text" });
+        return rt.pendingActions;
+      }
+
+      if (isAffirmativeText(raw) && rt.phase === "IDLE") {
+        brainLog(deps, "intent=ok ignored in IDLE → greeting");
+        send(rt, user.userId, "prompt", copy.greetingIdle);
+        return rt.pendingActions;
+      }
+
+      // Help / ok / unclear via parseReply (any phase for help)
+      const parse = deps.parseReply ?? (async () => ({ status: "unclear" as const }));
+      let parsed: ParsedReply;
+      try {
+        parsed = await parse(raw);
+      } catch {
+        parsed = { status: "unclear" };
+        brainLog(deps, "parseReply error → unclear");
+      }
+      brainLog(deps, `parseReply → ${parsed.status}`, parsed.placeLabel ?? "");
+
+      if (parsed.status === "help") {
+        await escalateHelp(deps, rt, user, now, "parseReply");
+        return rt.pendingActions;
+      }
+
+      if (
+        parsed.status === "ok" &&
+        (rt.phase === "CHECKING_IN" || rt.phase === "WALKING")
+      ) {
+        await logRule(deps, user.userId, "R9b", rt.walkId, { status: "ok" });
+        if (parsed.placeLabel && rt.pings.length) {
+          const last = rt.pings[rt.pings.length - 1]!;
+          if (deps.persist !== false) {
+            try {
+              await upsertPlaceLabel({
+                userId: user.userId,
+                cell: toCell(last.lat, last.lon),
+                lat: last.lat,
+                lon: last.lon,
+                label: parsed.placeLabel,
+                source: "user",
+              });
+            } catch {
+              /* ignore */
             }
           }
-          // R15 if reply implies elsewhere
-          if (
-            parsed.placeLabel ||
-            /at .+|i'?m at|staying/i.test(event.text)
-          ) {
-            const last = rt.pings[rt.pings.length - 1];
-            alert(
-              rt,
-              user.userId,
-              templates.alertContactElsewhere,
-              last?.lat ?? user.homeLat ?? 0,
-              last?.lon ?? user.homeLon ?? 0,
-            );
-            await endWalk(deps, rt, "ENDED_ELSEWHERE", now);
-            await logRule(deps, user.userId, "R15", null, { via: "reply" });
-            return rt.pendingActions;
-          }
-          rt.phase = "WALKING";
-          rt.checkinOpenedAt = null;
-          rt.suppressCheckinUntil = new Date(now.getTime() + 10 * 60_000);
-          return rt.pendingActions;
         }
-        if (parsed.status === "help") {
-          if (!rt.walkId) {
-            const last = rt.pings[rt.pings.length - 1];
-            await beginWalk(
-              deps,
-              rt,
-              user,
-              now,
-              "help",
-              last?.lat ?? 0,
-              last?.lon ?? 0,
-            );
-          }
-          rt.phase = "CALLING";
+        if (parsed.placeLabel || /at .+|i'?m at|staying/i.test(raw)) {
           const last = rt.pings[rt.pings.length - 1];
-          startCall(rt, user.userId, rt.walkId!, {
-            displayName: user.displayName ?? "friend",
-            street: rt.lastShortAddress ?? "nearby",
-            minutesWalking: rt.walkStartedAt
-              ? (now.getTime() - rt.walkStartedAt.getTime()) / 60000
-              : 0,
-            walkId: rt.walkId!,
-          });
           alert(
             rt,
             user.userId,
-            templates.alertContactHelp,
-            last?.lat ?? 0,
-            last?.lon ?? 0,
+            templates.alertContactElsewhere,
+            last?.lat ?? user.homeLat ?? 0,
+            last?.lon ?? user.homeLon ?? 0,
           );
+          await endWalk(deps, rt, "ENDED_ELSEWHERE", now);
+          await logRule(deps, user.userId, "R15", null, { via: "reply" });
           return rt.pendingActions;
         }
-        send(rt, user.userId, "nudge", copyFor(rt, "unclear"));
+        if (rt.phase === "CHECKING_IN") {
+          rt.phase = "WALKING";
+          rt.checkinOpenedAt = null;
+          rt.suppressCheckinUntil = new Date(now.getTime() + 10 * 60_000);
+        }
         return rt.pendingActions;
       }
+
+      // Unclear by phase
+      brainLog(deps, `intent=unclear phase=${rt.phase}`);
+      if (rt.phase === "PROMPTED") {
+        send(rt, user.userId, "prompt", copy.greetingPrompted);
+        return rt.pendingActions;
+      }
+      if (rt.phase === "WALKING" || rt.phase === "CHECKING_IN") {
+        send(rt, user.userId, "nudge", copyFor(rt, "unclear"));
+        await logRule(deps, user.userId, "R9b", rt.walkId, { status: "unclear" });
+        return rt.pendingActions;
+      }
+      // IDLE / ALERTED / CALLING
+      if (rt.phase === "IDLE") {
+        send(rt, user.userId, "prompt", copy.idleUnclear);
+      }
+      return rt.pendingActions;
     }
 
     if (event.type === "UserReaction") {
@@ -596,16 +715,19 @@ export function createBrainEngine(deps: BrainDeps) {
       if (rt.phase === "PROMPTED" && (event.emoji === "👍" || event.emoji === "👎")) {
         if (event.emoji === "👍") {
           const last = rt.pings[rt.pings.length - 1];
+          const originLat = last?.lat ?? user.homeLat ?? 0;
+          const originLon = last?.lon ?? user.homeLon ?? 0;
           await beginWalk(
             deps,
             rt,
             user,
             now,
             "prompt",
-            last?.lat ?? user.homeLat ?? 0,
-            last?.lon ?? user.homeLon ?? 0,
+            originLat,
+            originLon,
           );
           await logRule(deps, user.userId, "R3", rt.walkId, { reply: "like" });
+          await noticeIfUnfamiliar(deps, rt, user, originLat, originLon);
         } else {
           rt.phase = "IDLE";
           rt.cooldownUntil = new Date(now.getTime() + PROMPT_COOLDOWN_MS);
@@ -702,6 +824,7 @@ export function createBrainEngine(deps: BrainDeps) {
             );
             if (spd > 3) {
               await logRule(deps, user.userId, "R2x", null, { speed: spd });
+              brainLog(deps, "R2x skip prompt — vehicle speed", spd);
             } else if (
               elapsedS >= 120 &&
               spd >= 0.7 &&
@@ -709,14 +832,48 @@ export function createBrainEngine(deps: BrainDeps) {
               moved >= 120 &&
               distHome > 150
             ) {
-              send(rt, user.userId, "prompt");
-              rt.phase = "PROMPTED";
-              rt.lastPromptAt = now;
-              await logRule(deps, user.userId, "R2", null, {
-                speed: spd,
-                moved,
-                distHome,
-              });
+              const originLat = last.lat;
+              const originLon = last.lon;
+              let familiar: string[] = [];
+              try {
+                familiar = await loadFamiliarCells(user.userId);
+              } catch {
+                /* ignore */
+              }
+              const cell = toCell(originLat, originLon);
+              const unfamiliar =
+                familiar.length > 0 && !familiar.includes(cell);
+              if (unfamiliar) {
+                await beginWalk(
+                  deps,
+                  rt,
+                  user,
+                  now,
+                  "night_unfamiliar",
+                  originLat,
+                  originLon,
+                );
+                send(rt, user.userId, "checkin", copy.unfamiliarArea);
+                brainLog(
+                  deps,
+                  `R2 unfamiliar → beginWalk cell=${cell} usual=${familiar.length}`,
+                );
+                await logRule(deps, user.userId, "R2", rt.walkId, {
+                  speed: spd,
+                  moved,
+                  distHome,
+                  unfamiliar: true,
+                });
+              } else {
+                send(rt, user.userId, "prompt");
+                rt.phase = "PROMPTED";
+                rt.lastPromptAt = now;
+                await logRule(deps, user.userId, "R2", null, {
+                  speed: spd,
+                  moved,
+                  distHome,
+                });
+              }
             }
           }
         }
@@ -869,6 +1026,12 @@ export function createBrainEngine(deps: BrainDeps) {
               dwellMin,
               thresholdMin,
             });
+            brainLog(deps, `R5b stationary ${dwellMin.toFixed(1)}/${thresholdMin}m`);
+          } else if (!known && rt.stationarySince) {
+            brainLog(
+              deps,
+              `stationary ${dwellMin.toFixed(1)}/${thresholdMin}m (waiting)`,
+            );
           }
         }
 
@@ -956,5 +1119,3 @@ export function createBrainEngine(deps: BrainDeps) {
 
   return { handle, getLiveContext, getPhase, getRuntime, ensureHydrated };
 }
-
-const DEMO_FALLBACK = { lat: 40.8075, lon: -73.9626 };
