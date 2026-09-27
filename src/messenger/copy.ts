@@ -1,9 +1,11 @@
-import type {
-  EmergencyAction,
-  LearnedRoutine,
-  MonitoringMode,
-  NoResponseAction,
-  TrustedContact,
+import {
+  resolveTimeouts,
+  type CheckinTimeouts,
+  type EmergencyAction,
+  type LearnedRoutine,
+  type MonitoringMode,
+  type NoResponseAction,
+  type TrustedContact,
 } from "../shared/settings.ts";
 import type { UserRecord } from "../store/index.ts";
 
@@ -86,6 +88,10 @@ function contactLabel(c: TrustedContact): string {
   return c.name ?? `the number ending in ${c.phone.slice(-4)}`;
 }
 
+function timingSummary(t: Required<CheckinTimeouts>): string {
+  return `nudge after ${t.nudgeAfterSec}s, next step ${t.escalateAfterSec}s after that, check in if your location stops for ${t.noUpdateMin} min`;
+}
+
 export const copy = {
   intro:
     "Hi, I'm Nook 🌙 I keep an eye on your trips and check in if something seems unusual. If I can't confirm you're okay, I can call you or reach someone you trust.",
@@ -113,7 +119,7 @@ export const copy = {
   codeSet: (phrase: string, action: EmergencyAction, c?: TrustedContact) =>
     `'${phrase}' is set. If you send or say it, ${emergencyConsequence(action, c)}.`,
 
-  done: "You're all set 🌙\nI'll keep an eye on your trips based on the settings you chose and check in if something looks unusual.\n\nYou can text 'settings' anytime to change when I monitor, who I contact, how I escalate, or your emergency word.",
+  done: "You're all set 🌙\nI'll keep an eye on your trips based on the settings you chose and check in if something looks unusual.\n\nYou can text 'settings' anytime to change when I monitor, who I contact, how I escalate, your check-in timing, or your emergency word.",
 
   pickNumber: (n: number) => `Reply with a number from 1 to ${n}.`,
   yesOrNo: "Reply yes or no.",
@@ -134,6 +140,16 @@ export const copy = {
   confirmCode: (phrase: string, action: EmergencyAction, c?: TrustedContact) =>
     `Set your emergency word to '${phrase}'? If you send or say it, ${emergencyConsequence(action, c)}. Reply yes to confirm.`,
   confirmCodeRemoval: "Turn off your emergency word? Reply yes to confirm.",
+
+  askNudgeAfter: (current: number) =>
+    `If you don't answer a check-in, how many seconds should I wait before nudging you? (30–600, now ${current}s. Say 'same' to keep it.)`,
+  askEscalateAfter: (current: number) =>
+    `After the nudge, how many seconds before I take the next step? (30–600, now ${current}s. Say 'same' to keep it.)`,
+  askNoUpdate: (current: number) =>
+    `If your location stops updating while I'm watching, how many minutes before I check in? (2–15, now ${current} min. Say 'same' to keep it.)`,
+  badTiming: (min: number, max: number, unit: string) => `Send a number from ${min} to ${max} ${unit}.`,
+  confirmTimeouts: (t: Required<CheckinTimeouts>) =>
+    `Save these timings? ${timingSummary(t)}. Reply yes to confirm.`,
   confirmYesNo: "Reply yes to confirm, or no to keep things as they are.",
   changeSaved: "Done — your settings are updated.",
   codeRemoved: "Done — your emergency word is off.",
@@ -151,12 +167,14 @@ export const copy = {
         user.escalation ? escalationSummary(user.escalation.onNoTextResponse, c) : "not set"
       }`,
       `Emergency word: ${user.emergencyCode ? "configured" : "not set"}`,
+      `Check-in timing: ${timingSummary(resolveTimeouts(user.timeouts))}`,
       `Home: ${user.homeLat !== undefined ? "saved" : "not saved yet (text 'home' when you're there)"}`,
       "",
       "You can say things like:",
       "- 'only monitor when I start a trip'",
       "- 'change my trusted contact'",
       "- 'don't contact anyone if I miss a check-in'",
+      "- 'change my check-in timing'",
       "- 'change my emergency word'",
       "- 'what have you learned about me?'",
     ];

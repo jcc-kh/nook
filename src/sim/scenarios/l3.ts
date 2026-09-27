@@ -1,5 +1,5 @@
 /**
- * L3 suite: R5a, R6, R9b, R15 (after seed:history)
+ * L3 suite: R5a, R6 (+ confirm → confirmed_cells), R9b, R15 (after seed:history)
  */
 import { SimClock } from "../../shared/clock.ts";
 import { toCell } from "../../shared/cell.ts";
@@ -19,6 +19,7 @@ function night(): Date {
 
 async function main() {
   await upsertDemoUser({ ...DEMO });
+  await query(`DELETE FROM confirmed_cells WHERE user_id = $1`, [DEMO.userId]);
 
   const baselines = await query(
     `SELECT * FROM walk_baselines WHERE user_id = $1 LIMIT 5`,
@@ -109,14 +110,14 @@ async function main() {
     text: "I'm at Sam's",
     time: clock.now(),
   });
+  assert(brain.getPhase(DEMO.userId) === "IDLE", "R15: expected end elsewhere");
   assert(
-    endActions.some((a) => a.type === "AlertContact") ||
-      brain.getPhase(DEMO.userId) === "IDLE",
-    "R15: expected end elsewhere",
+    !endActions.some((a) => a.type === "AlertContact"),
+    "R15: contact must not be texted",
   );
   console.log("R9b/R15 ok");
 
-  // R6 off-route: new walk with route cells if any
+  // R6 off-route against usual cells (all finished walks + confirmed_cells)
   const brain2 = createBrainEngine({
     clock,
     getUser,
@@ -154,22 +155,28 @@ async function main() {
     lat: DEMO_ORIGIN.lat + 0.01,
     lon: DEMO_ORIGIN.lon + 0.01,
   });
-  const rt2 = brain2.getRuntime(DEMO.userId) as {
-    plan: { routeCells: string[] } | null;
-  };
-  if (rt2.plan && rt2.plan.routeCells.length > 0) {
-    assert(
-      a6.some((a) => a.type === "SendText") ||
-        (await query(
-          `SELECT 1 FROM events WHERE user_id=$1 AND rule_id='R6' LIMIT 1`,
-          [DEMO.userId],
-        )).rows.length > 0,
-      "R6: expected off-route checkin",
-    );
-    console.log("R6 ok");
-  } else {
-    console.log("R6 skipped (no route cells — seed:history first)");
-  }
+  assert(
+    a6.some((a) => a.type === "SendText" && a.text.includes("usual route")),
+    "R6: expected off-route checkin (run seed:history first)",
+  );
+  console.log("R6 ok");
+
+  // Confirming (👍) saves the off-route cells to confirmed_cells
+  await brain2.handle({
+    type: "UserReaction",
+    userId: DEMO.userId,
+    emoji: "👍",
+    targetMessageId: "r6",
+    time: clock.now(),
+  });
+  assert(brain2.getPhase(DEMO.userId) === "WALKING", "R6 confirm: WALKING");
+  const confirmed = await query(
+    `SELECT 1 FROM confirmed_cells WHERE user_id = $1 AND cell = $2`,
+    [DEMO.userId, toCell(DEMO_ORIGIN.lat + 0.01, DEMO_ORIGIN.lon + 0.01)],
+  );
+  assert(confirmed.rows.length === 1, "R6 confirm: cell saved to confirmed_cells");
+  console.log("R6 confirm ok");
+  await query(`DELETE FROM confirmed_cells WHERE user_id = $1`, [DEMO.userId]);
 
   // friend dwell R15
   await query(

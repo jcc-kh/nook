@@ -138,7 +138,27 @@ export type Intent =
   | { kind: "monitoring"; mode?: MonitoringMode }
   | { kind: "contact"; contact?: TrustedContact }
   | { kind: "escalation" }
+  | { kind: "timing" }
   | { kind: "code"; remove: boolean };
+
+/** "keep", "same", … while answering a timing question: leave that value as is. */
+export function isKeep(text: string): boolean {
+  return /^(same|keep( it)?|no change|unchanged|leave it|as is)\b/.test(normalize(text));
+}
+
+/**
+ * First number in the text, converted to `unit`. A bare number is read in
+ * `unit`; "90s", "2 min", "1.5 minutes" are converted.
+ */
+export function parseDuration(text: string, unit: "sec" | "min"): number | undefined {
+  const m = text.toLowerCase().match(/(\d+(?:\.\d+)?)\s*(s|secs?|seconds?|m|mins?|minutes?)?\b/);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n)) return undefined;
+  const said = m[2]?.startsWith("m") ? "min" : m[2] ? "sec" : unit;
+  if (said === unit) return n;
+  return said === "min" ? n * 60 : n / 60;
+}
 
 /**
  * Keyword intents for texts sent after onboarding. Returns null when nothing
@@ -150,6 +170,9 @@ export function parseIntent(text: string): Intent | null {
   const t = normalize(text);
   if (/\b(emergency|code|safe|secret) ?(word|phrase)\b|\bcodeword\b/.test(t)) {
     return { kind: "code", remove: /\b(remove|turn off|delete|disable|clear|no longer)\b/.test(t) };
+  }
+  if (/\btimings?\b|\btimeouts?\b|\bhow long\b|\bwait (longer|less)\b/.test(t)) {
+    return { kind: "timing" };
   }
   if (/\bcheck ?-?ins?\b|\bescalat|\bif i (don't|dont|do not) (respond|answer|reply)\b/.test(t)) {
     return { kind: "escalation" };

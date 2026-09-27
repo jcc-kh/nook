@@ -20,13 +20,16 @@ export {
   loadWalkBaselines,
   loadKnownStops,
   loadRouteCells,
+  loadUsualCells,
+  insertConfirmedCells,
+  listOpenWalkUserIds,
   buildDefaultPlan,
 } from "./walks.ts";
 
 function applyPatch(row: UserRecord, patch: UserPatch): void {
   Object.assign(row, patch);
-  if (patch.trustedContact?.phone) row.contact = patch.trustedContact.phone;
-  if (patch.emergencyCode?.phrase) row.codeword = patch.emergencyCode.phrase;
+  if ("trustedContact" in patch) row.contact = patch.trustedContact?.phone;
+  if ("emergencyCode" in patch) row.codeword = patch.emergencyCode?.phrase;
 }
 
 /** In-memory fallback (no DATABASE_URL / offline). */
@@ -96,83 +99,8 @@ export function createMemoryUserStore(): UserStore {
   };
 }
 
-/**
- * Tiger-backed store with an in-process overlay for Person A settings fields
- * that are not yet columns in `users` (monitoringMode, escalation, …).
- * contact/codeword stay synced to Tiger.
- */
-function wrapTigerWithSettings(tiger: UserStore): UserStore {
-  const settings = new Map<string, Partial<UserRecord>>();
-
-  function merge(base: UserRecord | null): UserRecord | null {
-    if (!base) return null;
-    // Overlay is in-memory; after a restart only Tiger's contact column survives.
-    const restored: Partial<UserRecord> =
-      base.contact ? { trustedContact: { phone: base.contact } } : {};
-    return { ...base, ...restored, ...settings.get(base.userId) };
-  }
-
-  return {
-    async upsertUser(handle: string) {
-      return merge(await tiger.upsertUser(handle))!;
-    },
-
-    async updateUser(userId: string, patch: UserPatch) {
-      const prev = settings.get(userId) ?? {};
-      const next: Partial<UserRecord> = { ...prev };
-      applyPatch(next as UserRecord, patch);
-      settings.set(userId, next);
-
-      if (patch.trustedContact?.phone || patch.contact) {
-        await tiger.setContact(userId, patch.trustedContact?.phone ?? patch.contact!);
-      }
-      if (patch.emergencyCode?.phrase || patch.codeword) {
-        await tiger.setCodeword(
-          userId,
-          patch.emergencyCode?.phrase ?? patch.codeword!,
-        );
-      }
-      if (patch.displayName !== undefined) {
-        // display_name is Tiger-only via upsertDemoUser for now; keep in overlay
-      }
-    },
-
-    async setContact(userId: string, contactE164: string) {
-      await tiger.setContact(userId, contactE164);
-      const prev = settings.get(userId) ?? {};
-      settings.set(userId, {
-        ...prev,
-        contact: contactE164,
-        trustedContact: {
-          ...(prev.trustedContact ?? { phone: contactE164 }),
-          phone: contactE164,
-        },
-      });
-    },
-
-    async setCodeword(userId: string, codeword: string) {
-      await tiger.setCodeword(userId, codeword);
-      const prev = settings.get(userId) ?? {};
-      settings.set(userId, { ...prev, codeword });
-    },
-
-    async setHome(userId: string, lat: number, lon: number) {
-      await tiger.setHome(userId, lat, lon);
-    },
-
-    async getByHandle(handle: string) {
-      return merge(await tiger.getByHandle(handle));
-    },
-
-    async getById(userId: string) {
-      return merge(await tiger.getById(userId));
-    },
-  };
-}
-
+/** Tiger when DATABASE_URL is set (settings are real columns), otherwise in-memory. */
 export function createUserStore(): UserStore {
-  if (process.env.DATABASE_URL?.trim()) {
-    return wrapTigerWithSettings(createTigerUserStore());
-  }
+  if (process.env.DATABASE_URL?.trim()) return createTigerUserStore();
   return createMemoryUserStore();
 }

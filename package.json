@@ -15,7 +15,9 @@
     "sim:l2": "bun run src/sim/scenarios/l2.ts",
     "sim:l3": "bun run src/sim/scenarios/l3.ts",
     "sim:l4": "bun run src/sim/scenarios/l4.ts",
-    "sim:reachout": "bun run src/sim/scenarios/reachout.ts"
+    "sim:reachout": "bun run src/sim/scenarios/reachout.ts",
+    "sim:live": "bun run src/scripts/sim-live.ts",
+    "events:tail": "bun run src/scripts/events-tail.ts"
   },
   "dependencies": {
     "@google/genai": "^1.19.0",

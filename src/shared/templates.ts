@@ -5,12 +5,15 @@ export const templates = {
   prompt: "Heading home? 👍",
   checkin: "You ok? Tap 👍 or text me.",
   nudge: "Still there? Tap 👍 so I know you're alright.",
-  arrived: "Got home safe.",
+  arrived: "I see that you got home safe. Have a good rest!",
   ended: "Walk ended — staying somewhere else tonight.",
   unclear: "Didn't catch that — tap 👍 if you're good, or text me.",
+  checkinOffRoute: "Looks like you're off your usual route. All good? Tap 👍 or tell me where you're headed.",
+  checkinNoUpdate: "I haven't had a location update from you in a few minutes. You ok? Tap 👍 or text me.",
+  finalNudge: "Haven't heard back. Tap 👍 when you can — I won't reach out to anyone.",
+  // The contact is only texted when something is wrong.
   alertContactQuiet: "Nook: no reply while walking. Last known location below.",
-  alertContactHome: "Nook: made it home.",
-  alertContactElsewhere: "Nook: ended the walk elsewhere.",
+  alertContactOffRoute: "Nook: went off their usual route and isn't answering check-ins. Last known location below.",
   alertContactHelp: "Nook: needs help — check on them.",
 } as const satisfies Record<string, string>;
 

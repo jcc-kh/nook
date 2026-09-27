@@ -1,5 +1,13 @@
 import type { Locations } from "../locations/index.ts";
-import type { EscalationPolicy, LearnedRoutine } from "../shared/settings.ts";
+import {
+  clampTimeout,
+  resolveTimeouts,
+  TIMEOUT_LIMITS,
+  type CheckinTimeouts,
+  type EscalationPolicy,
+  type LearnedRoutine,
+  type TimeoutKey,
+} from "../shared/settings.ts";
 import type { Clock, Event, SendTextTag } from "../shared/types.ts";
 import type { UserPatch, UserRecord, UserStore } from "../store/index.ts";
 import { copy, emergencyOptions, escalationOptions, learnedSummary, monitoringOptions } from "./copy.ts";
@@ -10,11 +18,13 @@ import {
   HOME_RE,
   type Intent,
   isCancel,
+  isKeep,
   LOC_RE,
   monitoringKeyword,
   parseChoice,
   parseCodePhrase,
   parseContact,
+  parseDuration,
   parseIntent,
   parseYesNo,
 } from "./parse.ts";
@@ -25,11 +35,23 @@ import type { Inbound, SpectrumMessenger } from "./spectrum.ts";
  * decided here from structured state; nothing is inferred by an LLM.
  */
 
-type Question = "contact" | "monitoring" | "escalation" | "codeOffer" | "codePhrase" | "codeAction";
+type Question =
+  | "contact"
+  | "monitoring"
+  | "escalation"
+  | "codeOffer"
+  | "codePhrase"
+  | "codeAction"
+  | "timeNudge"
+  | "timeEscalate"
+  | "timeNoUpdate";
 
 type Pending =
-  /** `editing`: changing a setting after onboarding, so the answer needs a yes before it's saved. */
-  | { kind: "ask"; question: Question; editing: boolean; phrase?: string }
+  /**
+   * `editing`: changing a setting after onboarding, so the answer needs a yes before it's saved.
+   * `draft`: timings collected so far in the "change my check-in timing" flow.
+   */
+  | { kind: "ask"; question: Question; editing: boolean; phrase?: string; draft?: CheckinTimeouts }
   | { kind: "confirm"; patch: UserPatch; saved: string; summary: string };
 
 type AskPending = Extract<Pending, { kind: "ask" }>;
@@ -79,12 +101,42 @@ export function createInboundRouter(deps: RouterDeps) {
         return copy.askCodePhrase;
       case "codeAction":
         return copy.askCodeAction(phrase ?? "", user.trustedContact);
+      case "timeNudge":
+        return copy.askNudgeAfter(resolveTimeouts(user.timeouts).nudgeAfterSec);
+      case "timeEscalate":
+        return copy.askEscalateAfter(resolveTimeouts(user.timeouts).escalateAfterSec);
+      case "timeNoUpdate":
+        return copy.askNoUpdate(resolveTimeouts(user.timeouts).noUpdateMin);
     }
   }
 
-  async function ask(user: UserRecord, question: Question, editing: boolean, phrase?: string) {
-    pending.set(user.userId, { kind: "ask", question, editing, ...(phrase && { phrase }) });
+  async function ask(
+    user: UserRecord,
+    question: Question,
+    editing: boolean,
+    phrase?: string,
+    draft?: CheckinTimeouts,
+  ) {
+    pending.set(user.userId, {
+      kind: "ask",
+      question,
+      editing,
+      ...(phrase && { phrase }),
+      ...(draft && { draft }),
+    });
     await reply(user, questionText(user, question, phrase));
+  }
+
+  /** One step of the timing flow: a number in range, or "same" to keep the current value. */
+  function readTiming(user: UserRecord, key: TimeoutKey, text: string): number | string {
+    const unit = key === "noUpdateMin" ? "min" : "sec";
+    const { min, max } = TIMEOUT_LIMITS[key];
+    if (isKeep(text)) return resolveTimeouts(user.timeouts)[key];
+    const n = parseDuration(text, unit);
+    if (n === undefined || n < min || n > max) {
+      return copy.badTiming(min, max, unit === "min" ? "minutes" : "seconds");
+    }
+    return clampTimeout(key, n);
   }
 
   async function propose(user: UserRecord, patch: UserPatch, prompt: string, saved: string, summary: string) {
@@ -196,6 +248,28 @@ export function createInboundRouter(deps: RouterDeps) {
         await reply(user, set);
         return finish(user);
       }
+      case "timeNudge": {
+        const v = readTiming(user, "nudgeAfterSec", text);
+        if (typeof v === "string") return void (await reply(user, v));
+        return ask(user, "timeEscalate", true, undefined, { ...p.draft, nudgeAfterSec: v });
+      }
+      case "timeEscalate": {
+        const v = readTiming(user, "escalateAfterSec", text);
+        if (typeof v === "string") return void (await reply(user, v));
+        return ask(user, "timeNoUpdate", true, undefined, { ...p.draft, escalateAfterSec: v });
+      }
+      case "timeNoUpdate": {
+        const v = readTiming(user, "noUpdateMin", text);
+        if (typeof v === "string") return void (await reply(user, v));
+        const timeouts = resolveTimeouts({ ...p.draft, noUpdateMin: v });
+        return propose(
+          user,
+          { timeouts },
+          copy.confirmTimeouts(timeouts),
+          copy.changeSaved,
+          `timeouts: nudge ${timeouts.nudgeAfterSec}s, escalate ${timeouts.escalateAfterSec}s, no-update ${timeouts.noUpdateMin}min`,
+        );
+      }
     }
   }
 
@@ -222,6 +296,8 @@ export function createInboundRouter(deps: RouterDeps) {
         );
       case "escalation":
         return ask(user, "escalation", true);
+      case "timing":
+        return ask(user, "timeNudge", true);
       case "code":
         if (!intent.remove) return ask(user, "codePhrase", true);
         if (!user.emergencyCode) return reply(user, copy.noCodeToRemove);

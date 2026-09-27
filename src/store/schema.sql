@@ -22,6 +22,17 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE INDEX IF NOT EXISTS users_handle_idx ON users (handle);
 
+-- Onboarding / settings (Person A). `contact` = trusted contact phone,
+-- `codeword` = emergency word; both predate these columns.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS trusted_name TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS monitoring_mode TEXT;            -- MANUAL | EVENINGS | AWAY_FROM_HOME
+ALTER TABLE users ADD COLUMN IF NOT EXISTS escalation_on_no_response TEXT;  -- CALL_USER | CONTACT_TRUSTED | CALL_THEN_CONTACT | NONE
+ALTER TABLE users ADD COLUMN IF NOT EXISTS emergency_action TEXT;           -- CALL_USER | CONTACT_TRUSTED | CALL_THEN_CONTACT
+ALTER TABLE users ADD COLUMN IF NOT EXISTS nudge_after_sec INTEGER;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS escalate_after_sec INTEGER;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS no_update_min INTEGER;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarded_at TIMESTAMPTZ;
+
 -- ---------------------------------------------------------------------------
 -- location_pings (hypertable)
 -- ---------------------------------------------------------------------------
@@ -94,6 +105,16 @@ CREATE TABLE IF NOT EXISTS place_labels (
   kind          TEXT, -- e.g. 'friend', 'bodega'
   ok_dwell_min  INTEGER,
   source        TEXT, -- 'seed' | 'user' | 'gemini'
+  PRIMARY KEY (user_id, cell)
+);
+
+-- ---------------------------------------------------------------------------
+-- confirmed_cells: off-route stretches the user said were intentional (R6)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS confirmed_cells (
+  user_id       TEXT NOT NULL REFERENCES users(user_id),
+  cell          TEXT NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (user_id, cell)
 );
 

@@ -145,6 +145,8 @@ export interface LiveContext {
 export interface Brain {
   handle(event: Event): Promise<Action[]>;
   getLiveContext(walkId: string): Promise<LiveContext | null>;
+  /** Time-based rules (reply timers, no-update, lateness). Called every 30 s. */
+  tick?(now: Date): Promise<Action[]>;
 }
 
 // --- Walk plan (loaded once on enter WALKING) ---
