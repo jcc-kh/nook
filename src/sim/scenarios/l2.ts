@@ -91,6 +91,27 @@ async function main() {
     console.log("R5b ok");
   }
 
+  // R5b must not fire on a steady walk with frequent pings (~20 m apart)
+  {
+    const clock = new SimClock(night());
+    const brain = createBrainEngine({ clock, getUser, persist: true });
+    await startWalking(brain, clock);
+    let sends = 0;
+    for (let i = 1; i <= 20; i++) {
+      clock.advance(15_000);
+      const a = await brain.handle({
+        type: "LocationPing",
+        userId: DEMO.userId,
+        time: clock.now(),
+        lat: DEMO_ORIGIN.lat + i * 0.000175,
+        lon: DEMO_ORIGIN.lon,
+      });
+      sends += a.filter((x) => x.type === "SendText" && x.tag === "checkin").length;
+    }
+    assert(sends === 0, `R5b: steady walk should not check in (got ${sends})`);
+    console.log("R5b steady walk ok");
+  }
+
   // R7a late
   {
     const clock = new SimClock(night());

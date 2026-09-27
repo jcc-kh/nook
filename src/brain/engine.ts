@@ -95,6 +95,8 @@ interface UserRuntime {
   homeNearCount: number;
   suppressCheckinUntil: Date | null;
   stationarySince: Date | null;
+  /** First ping of the current possible stop. */
+  stationaryAnchor: LocationPing | null;
   offRouteSince: Date | null;
   /** Cells seen during the current off-route stretch (saved on confirm). */
   offRouteCells: string[];
@@ -133,6 +135,7 @@ function emptyRuntime(): UserRuntime {
     homeNearCount: 0,
     suppressCheckinUntil: null,
     stationarySince: null,
+    stationaryAnchor: null,
     offRouteSince: null,
     offRouteCells: [],
     offRouteConfirmed: false,
@@ -425,6 +428,7 @@ async function beginWalk(
   rt.nudged = false;
   rt.escalated = false;
   rt.stationarySince = null;
+  rt.stationaryAnchor = null;
   rt.knownStopSince = null;
   rt.friendSince = null;
   rt.awayPings = 0;
@@ -812,18 +816,22 @@ export function createBrainEngine(deps: BrainDeps) {
     });
   }
 
-  /** Stationary + known-stop tracking for the timer-driven dwell rules. */
+  /**
+   * Stationary + known-stop tracking for the timer-driven dwell rules.
+   * Distance is measured from where the user stopped, not from the previous
+   * ping: frequent pings on a slow walk are each < STATIONARY_M apart.
+   */
   function trackDwell(rt: UserRuntime, prev: LocationPing | null, ping: LocationPing, now: Date) {
-    if (prev) {
-      const moved = distanceM(prev.lat, prev.lon, ping.lat, ping.lon);
-      if (moved < STATIONARY_M) {
-        if (!rt.stationarySince) rt.stationarySince = prev.time;
-      } else {
-        rt.stationarySince = null;
-        rt.knownStopSince = null;
-        rt.knownStopCell = null;
-        rt.friendSince = null;
-      }
+    if (!rt.stationaryAnchor) rt.stationaryAnchor = prev ?? ping;
+    const anchor = rt.stationaryAnchor;
+    if (distanceM(anchor.lat, anchor.lon, ping.lat, ping.lon) < STATIONARY_M) {
+      if (!rt.stationarySince && anchor !== ping) rt.stationarySince = anchor.time;
+    } else {
+      rt.stationaryAnchor = ping;
+      rt.stationarySince = null;
+      rt.knownStopSince = null;
+      rt.knownStopCell = null;
+      rt.friendSince = null;
     }
     const cell = toCell(ping.lat, ping.lon);
     const known = rt.plan?.stops.find((s) => s.cell === cell);
