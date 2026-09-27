@@ -56,7 +56,7 @@ export async function nextGuidance(
   here: LatLon & { headingDeg?: number },
   opts?: { refresh?: boolean },
 ): Promise<GuidanceResult> {
-  const apiKey = process.env.GEOAPIFY_API_KEY?.trim();
+  const apiKey = process.env.GEOAPIFY_API_KEY?.trim() || process.env.GEO_API_KEY?.trim();
   if (!apiKey) return demoGuide(here);
 
   if (opts?.refresh) {

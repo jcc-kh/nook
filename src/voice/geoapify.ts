@@ -65,6 +65,36 @@ const PREFER: [string, number][] = [
 /** Try a short walk first, then a few blocks, so a nearby store beats a far one. */
 const RADII_M = [500, 1200];
 
+/**
+ * Walk-test log. Prints the live fix and the places Geoapify returned around it,
+ * nearest first. Stops at the first radius that has results.
+ */
+export async function logNearbyPlaces(
+  here: LatLon & { accuracyM?: number; kind?: string },
+): Promise<void> {
+  const apiKey = process.env.GEOAPIFY_API_KEY?.trim() || process.env.GEO_API_KEY?.trim();
+  const acc = here.accuracyM !== undefined ? ` ±${here.accuracyM.toFixed(1)}m` : "";
+  const kind = here.kind ? ` ${here.kind}` : "";
+  console.log(`[maps] you ${here.lat.toFixed(5)},${here.lon.toFixed(5)}${acc}${kind}`);
+  if (!apiKey) {
+    console.log("[maps] no places key set");
+    return;
+  }
+  for (const radius of RADII_M) {
+    const found = [...(await searchPlaces(apiKey, here, radius))].sort((a, b) => a.distanceM - b.distanceM);
+    console.log(`[maps] geoapify ${found.length} named places within ${radius}m`);
+    for (const place of found.slice(0, 8)) {
+      const feet = Math.round(place.distanceM * 3.28084);
+      const category = place.categories.find((c) => c.includes(".")) ?? place.categories[0] ?? "";
+      console.log(
+        `[maps]   ${Math.round(place.distanceM)}m ${feet}ft  ${place.name}  ${place.lat.toFixed(5)},${place.lon.toFixed(5)}  ${category}`,
+      );
+    }
+    if (found.length > 8) console.log(`[maps]   … ${found.length - 8} more`);
+    if (found.length > 0) return;
+  }
+}
+
 export async function findNearbySafePlace(
   apiKey: string,
   here: LatLon,

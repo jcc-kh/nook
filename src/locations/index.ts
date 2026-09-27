@@ -7,8 +7,10 @@ import {
   type TypedEventStream,
 } from "@photon-ai/advanced-imessage/grpc";
 import { cloud, type TokenData } from "spectrum-ts";
+import { distanceM } from "../shared/geo.ts";
 import type { Clock, LocationPing } from "../shared/types.ts";
 import type { UserStore } from "../store/index.ts";
+import { logNearbyPlaces } from "../voice/geoapify.ts";
 
 export interface Fix {
   lat: number;
@@ -81,6 +83,7 @@ export async function createLocations(opts: LocationsOptions): Promise<Locations
     lastActivity = Date.now();
   });
   const lastSeqByAddress = new Map<string, number>();
+  const lastMapsLog = new Map<string, { lat: number; lon: number; at: number }>();
   let stopped = false;
   let current: TypedEventStream<SharedFriendLocationUpdated> | undefined;
 
@@ -109,6 +112,15 @@ export async function createLocations(opts: LocationsOptions): Promise<Locations
       shortAddress: location.shortAddress,
       time: clock.now(),
     });
+
+    if (process.env.MAPS_LOG === "1" && mapsLogDue(lastMapsLog, location.address, location.latitude, location.longitude)) {
+      void logNearbyPlaces({
+        lat: location.latitude,
+        lon: location.longitude,
+        ...(location.accuracy !== undefined && { accuracyM: location.accuracy }),
+        ...(location.locationType && { kind: location.locationType }),
+      }).catch((err) => console.error("[maps] lookup failed", err instanceof Error ? err.message : err));
+    }
   }
 
   async function watchLoop() {
@@ -186,6 +198,20 @@ export async function createLocations(opts: LocationsOptions): Promise<Locations
       await client.close();
     },
   };
+}
+
+/** Skip a places lookup when the phone has barely moved and we just logged one. */
+function mapsLogDue(
+  last: Map<string, { lat: number; lon: number; at: number }>,
+  address: string,
+  lat: number,
+  lon: number,
+): boolean {
+  const prev = last.get(address);
+  const now = Date.now();
+  if (prev && now - prev.at < 20_000 && distanceM(prev.lat, prev.lon, lat, lon) < 15) return false;
+  last.set(address, { lat, lon, at: now });
+  return true;
 }
 
 /**
