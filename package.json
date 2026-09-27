@@ -13,18 +13,18 @@
     "sim:l1": "bun run src/sim/scenarios/l1.ts",
     "sim:l2": "bun run src/sim/scenarios/l2.ts",
     "sim:l3": "bun run src/sim/scenarios/l3.ts",
-    "sim:l4": "bun run src/sim/scenarios/l4.ts"
+    "sim:l4": "bun run src/sim/scenarios/l4.ts",
+    "sim:reachout": "bun run src/sim/scenarios/reachout.ts"
   },
   "dependencies": {
-    "pg": "^8.16.3"
+    "@google/genai": "^1.19.0",
+    "@photon-ai/advanced-imessage": "^2.2.0",
+    "pg": "^8.16.3",
+    "spectrum-ts": "^12.10.1"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/pg": "^8.15.5",
     "typescript": "^5.9.2"
-  },
-  "dependencies": {
-    "@photon-ai/advanced-imessage": "^2.2.0",
-    "spectrum-ts": "^12.10.1"
   }
 }

@@ -1,0 +1,25 @@
+import type { ParseReply, WriteMessages } from "../shared/types.ts";
+import { templates } from "../shared/templates.ts";
+
+export const writeMessagesFallback: WriteMessages = async () => ({
+  prompt: templates.prompt,
+  checkin: templates.checkin,
+  nudge: templates.nudge,
+  arrived: templates.arrived,
+  ended: templates.ended,
+  unclear: templates.unclear,
+});
+
+/** Regex parser used when Gemini is off or fails. */
+export const parseReplyFallback: ParseReply = async (text) => {
+  const t = text.toLowerCase();
+  if (/help|emergency|scared|danger/.test(t)) return { status: "help" };
+  if (/ok|fine|good|safe|all good|i'?m good/.test(t)) {
+    return { status: "ok" };
+  }
+  if (/i'?m at |at .+|staying at/.test(t)) {
+    const m = text.match(/at\s+(.+)/i);
+    return { status: "ok", placeLabel: m?.[1]?.trim() ?? "somewhere" };
+  }
+  return { status: "unclear" };
+};

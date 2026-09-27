@@ -1,9 +1,9 @@
 import { toCell } from "../shared/cell.ts";
 import type { LocationPing, RuleId } from "../shared/types.ts";
 import { query } from "./db.ts";
-import type { UserRecord, UserStore } from "./types.ts";
+import type { UserPatch, UserRecord, UserStore } from "./types.ts";
 
-export type { UserRecord, UserStore } from "./types.ts";
+export type { UserPatch, UserRecord, UserStore } from "./types.ts";
 
 type UserRow = {
   user_id: string;
@@ -59,6 +59,24 @@ export function createTigerUserStore(): UserStore {
         userId,
       ]);
       return rowToUser(created.rows[0]!);
+    },
+
+    async updateUser(userId: string, patch: UserPatch): Promise<void> {
+      const contact = patch.trustedContact?.phone ?? patch.contact;
+      const codeword = patch.emergencyCode?.phrase ?? patch.codeword;
+      const displayName = patch.displayName;
+      if (contact === undefined && codeword === undefined && displayName === undefined) {
+        return;
+      }
+      const res = await query(
+        `UPDATE users SET
+           contact = COALESCE($2, contact),
+           codeword = COALESCE($3, codeword),
+           display_name = COALESCE($4, display_name)
+         WHERE user_id = $1`,
+        [userId, contact ?? null, codeword ?? null, displayName ?? null],
+      );
+      if (res.rowCount === 0) throw new Error(`unknown user ${userId}`);
     },
 
     async setContact(userId: string, contactE164: string): Promise<void> {

@@ -1,34 +1,48 @@
 import type { ParseReply, WriteMessages } from "../shared/types.ts";
-import { templates } from "../shared/templates.ts";
+import { createGeminiClient } from "./gemini.ts";
+import { parseReplyFallback, writeMessagesFallback } from "./fallback.ts";
+
+export { parseReplyFallback, writeMessagesFallback } from "./fallback.ts";
 
 /**
- * Person B fills these in L3/L5. Do not import from the location-ping rule path
- * except via injected parseReply dependency.
+ * LLM craft/parse. Never imported from the location-ping rule path except via
+ * injected parseReply / writeMessages dependencies on the brain.
  */
 
-export const writeMessagesFallback: WriteMessages = async () => ({
-  prompt: templates.prompt,
-  checkin: templates.checkin,
-  nudge: templates.nudge,
-  arrived: templates.arrived,
-  ended: templates.ended,
-  unclear: templates.unclear,
-});
+export interface Llm {
+  writeMessages: WriteMessages;
+  parseReply: ParseReply;
+  /** True when Gemini is active (API key present and USE_GEMINI !== "0"). */
+  useGemini: boolean;
+}
 
-/** Stub parser for sim/tests until Gemini is wired. */
-export const parseReplyFallback: ParseReply = async (text) => {
-  const t = text.toLowerCase();
-  if (/help|emergency|scared|danger/.test(t)) return { status: "help" };
-  if (/ok|fine|good|safe|all good|i'?m good/.test(t)) {
-    return { status: "ok" };
-  }
-  if (/i'?m at |at .+|staying at/.test(t)) {
-    const m = text.match(/at\s+(.+)/i);
-    return { status: "ok", placeLabel: m?.[1]?.trim() ?? "somewhere" };
-  }
-  return { status: "unclear" };
-};
+/** Resolve whether Gemini should run for this process. */
+export function geminiEnabled(): boolean {
+  if (process.env.USE_GEMINI === "0") return false;
+  if (process.env.USE_GEMINI === "1") return Boolean(process.env.GEMINI_API_KEY?.trim());
+  return Boolean(process.env.GEMINI_API_KEY?.trim());
+}
 
-export function notImplementedLlm(): never {
-  throw new Error("TODO: Person B — src/llm (Gemini writeMessages / parseReply)");
+export function createLlm(opts?: { useGemini?: boolean }): Llm {
+  const useGemini = opts?.useGemini ?? geminiEnabled();
+  if (useGemini) {
+    const key = process.env.GEMINI_API_KEY?.trim();
+    if (!key) {
+      console.warn("[llm] USE_GEMINI requested but GEMINI_API_KEY missing — templates only");
+      return {
+        writeMessages: writeMessagesFallback,
+        parseReply: parseReplyFallback,
+        useGemini: false,
+      };
+    }
+    console.log("[llm] Gemini enabled");
+    const client = createGeminiClient(key);
+    return { ...client, useGemini: true };
+  }
+  console.log("[llm] templates + regex fallback (Gemini off)");
+  return {
+    writeMessages: writeMessagesFallback,
+    parseReply: parseReplyFallback,
+    useGemini: false,
+  };
 }

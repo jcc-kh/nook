@@ -9,6 +9,7 @@ import type {
   SendTextTag,
   WalkPhase,
   WalkPlan,
+  WriteMessages,
 } from "../shared/types.ts";
 import { toCell } from "../shared/cell.ts";
 import { distanceM, pathLengthM, speedMps } from "../shared/geo.ts";
@@ -41,7 +42,10 @@ export interface BrainDeps {
   clock: Clock;
   getUser: (userId: string) => Promise<UserRecord | null>;
   parseReply?: ParseReplyFn;
+  writeMessages?: WriteMessages;
   persist?: boolean;
+  /** Log rule firings and outbound copy to console. */
+  verbose?: boolean;
 }
 
 interface UserRuntime {
@@ -49,6 +53,8 @@ interface UserRuntime {
   walkId: string | null;
   walkStartedAt: Date | null;
   plan: WalkPlan | null;
+  /** Crafted copy from writeMessages (templates if LLM off). */
+  copy: Record<string, string> | null;
   pings: LocationPing[];
   lastPromptAt: Date | null;
   lastPromptMessageId: string | null;
@@ -74,6 +80,7 @@ function emptyRuntime(): UserRuntime {
     walkId: null,
     walkStartedAt: null,
     plan: null,
+    copy: null,
     pings: [],
     lastPromptAt: null,
     lastPromptMessageId: null,
@@ -91,6 +98,10 @@ function emptyRuntime(): UserRuntime {
     friendSince: null,
     pendingActions: [],
   };
+}
+
+function brainLog(deps: BrainDeps, ...parts: unknown[]) {
+  if (deps.verbose) console.log("[brain]", ...parts);
 }
 
 function isNight(now: Date, user: UserRecord): boolean {
@@ -140,6 +151,7 @@ async function logRule(
   walkId: string | null,
   detail: Record<string, unknown> = {},
 ) {
+  brainLog(deps, `rule ${ruleId}`, detail, walkId ? `(walk ${walkId})` : "");
   if (deps.persist === false) return;
   try {
     await insertEvent({
@@ -154,6 +166,13 @@ async function logRule(
   }
 }
 
+function copyFor(rt: UserRuntime, tag: SendTextTag | "unclear"): string {
+  const fromBank = rt.copy?.[tag];
+  if (fromBank) return fromBank;
+  if (tag === "unclear") return templates.unclear;
+  return templateForTag(tag);
+}
+
 function send(
   rt: UserRuntime,
   userId: string,
@@ -163,7 +182,7 @@ function send(
   const action: Action = {
     type: "SendText",
     userId,
-    text: text ?? templateForTag(tag),
+    text: text ?? copyFor(rt, tag),
     tag,
   };
   rt.pendingActions.push(action);
@@ -291,6 +310,23 @@ async function beginWalk(
   rt.knownStopSince = null;
   rt.friendSince = null;
 
+  if (deps.writeMessages) {
+    try {
+      rt.copy = await deps.writeMessages(plan);
+      brainLog(deps, "writeMessages ready", Object.keys(rt.copy));
+    } catch (err) {
+      console.warn("[brain] writeMessages failed", err);
+      rt.copy = null;
+    }
+  } else {
+    rt.copy = null;
+  }
+
+  brainLog(
+    deps,
+    `beginWalk ${walkId} trigger=${trigger} expected=${plan.expectedMin.toFixed(0)}m late=${plan.lateMin.toFixed(0)}m`,
+  );
+
   if (deps.persist !== false) {
     try {
       await insertWalk({
@@ -319,6 +355,7 @@ async function endWalk(
 ) {
   const walkId = rt.walkId;
   rt.phase = "IDLE";
+  brainLog(deps, `endWalk ${walkId} → ${status}`);
   if (walkId && deps.persist !== false) {
     try {
       await updateWalkStatus(walkId, status, now);
@@ -329,6 +366,7 @@ async function endWalk(
   rt.walkId = null;
   rt.walkStartedAt = null;
   rt.plan = null;
+  rt.copy = null;
   rt.homeNearCount = 0;
   rt.checkinOpenedAt = null;
 }
@@ -471,7 +509,7 @@ export function createBrainEngine(deps: BrainDeps) {
           parsed = await parse(event.text);
         } catch {
           parsed = { status: "unclear" };
-          send(rt, user.userId, "nudge", templates.unclear);
+          send(rt, user.userId, "nudge", copyFor(rt, "unclear"));
           await logRule(deps, user.userId, "R9b", rt.walkId, { status: "unclear", error: true });
           return rt.pendingActions;
         }
@@ -548,7 +586,7 @@ export function createBrainEngine(deps: BrainDeps) {
           );
           return rt.pendingActions;
         }
-        send(rt, user.userId, "nudge", templates.unclear);
+        send(rt, user.userId, "nudge", copyFor(rt, "unclear"));
         return rt.pendingActions;
       }
     }
@@ -860,7 +898,9 @@ export function createBrainEngine(deps: BrainDeps) {
               user.userId,
               now,
               "checkin",
-              "Still out? Getting worried — tap 👍.",
+              rt.copy?.checkin
+                ? `${rt.copy.checkin} (still out — getting worried)`
+                : "Still out? Getting worried — tap 👍.",
             );
             await logRule(deps, user.userId, "R7b", rt.walkId, { elapsedMin });
           } else if (elapsedMin > rt.plan.lateMin && canCheckin(rt, now)) {

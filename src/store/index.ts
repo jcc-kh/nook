@@ -1,40 +1,7 @@
-import type { UserSettings } from "../shared/settings.ts";
-
-import type { UserStore } from "./types.ts";
+import type { UserPatch, UserRecord, UserStore } from "./types.ts";
 import { createTigerUserStore } from "./users.ts";
 
-/**
- * Onboarding writes Person A needs. Hour-0: in-memory no-op.
- * Person B replaces with Tiger-backed store in L1.
- */
-
-export interface UserRecord extends UserSettings {
-  userId: string;
-  handle: string; // E.164 or email used on iMessage
-  homeLat?: number;
-  homeLon?: number;
-  nightStart?: string; // "22:00", the EVENINGS monitoring window
-  nightEnd?: string; // "06:00"
-  tz?: string;
-  onboardedAt?: Date;
-}
-
-/** Keys present in the patch are written; `undefined` clears (e.g. removing the emergency code). */
-export type UserPatch = Partial<UserSettings> & { onboardedAt?: Date };
-
-export interface UserStore {
-  upsertUser(handle: string): Promise<UserRecord>;
-  updateUser(userId: string, patch: UserPatch): Promise<void>;
-  setHome(userId: string, lat: number, lon: number): Promise<void>;
-  getByHandle(handle: string): Promise<UserRecord | null>;
-  getById(userId: string): Promise<UserRecord | null>;
-}
-
-export function createMemoryUserStore(): UserStore {
-  const byId = new Map<string, UserRecord>();
- * Store layer — Tiger-backed by default; memory store kept for Person A offline.
- */
-export type { UserRecord, UserStore } from "./types.ts";
+export type { UserPatch, UserRecord, UserStore } from "./types.ts";
 export { getPool, getDatabaseUrl, closePool, query, withClient } from "./db.ts";
 export {
   createTigerUserStore,
@@ -56,22 +23,15 @@ export {
   buildDefaultPlan,
 } from "./walks.ts";
 
-/** In-memory fallback (hour-0 / no DATABASE_URL). */
+function applyPatch(row: UserRecord, patch: UserPatch): void {
+  Object.assign(row, patch);
+  if (patch.trustedContact?.phone) row.contact = patch.trustedContact.phone;
+  if (patch.emergencyCode?.phrase) row.codeword = patch.emergencyCode.phrase;
+}
+
+/** In-memory fallback (no DATABASE_URL / offline). */
 export function createMemoryUserStore(): UserStore {
-  const byId = new Map<
-    string,
-    {
-      userId: string;
-      handle: string;
-      contact?: string;
-      codeword?: string;
-      homeLat?: number;
-      homeLon?: number;
-      nightStart?: string;
-      nightEnd?: string;
-      tz?: string;
-    }
-  >();
+  const byId = new Map<string, UserRecord>();
   const handleToId = new Map<string, string>();
   let seq = 0;
 
@@ -82,7 +42,7 @@ export function createMemoryUserStore(): UserStore {
   }
 
   return {
-    async upsertUser(handle: string) {
+    async upsertUser(handle: string): Promise<UserRecord> {
       const existingId = handleToId.get(handle);
       if (existingId) {
         const existing = byId.get(existingId);
@@ -91,7 +51,6 @@ export function createMemoryUserStore(): UserStore {
       seq += 1;
       const userId = `user-${seq}`;
       const created: UserRecord = {
-      const row = {
         userId,
         handle,
         nightStart: "22:00",
@@ -104,42 +63,115 @@ export function createMemoryUserStore(): UserStore {
     },
 
     async updateUser(userId: string, patch: UserPatch): Promise<void> {
-      Object.assign(row(userId), patch);
-    async setContact(userId, contactE164) {
-      const row = byId.get(userId);
-      if (!row) throw new Error(`unknown user ${userId}`);
-      row.contact = contactE164;
+      applyPatch(row(userId), patch);
     },
-    async setCodeword(userId, codeword) {
-      const row = byId.get(userId);
-      if (!row) throw new Error(`unknown user ${userId}`);
-      row.codeword = codeword;
+
+    async setContact(userId: string, contactE164: string): Promise<void> {
+      const r = row(userId);
+      r.contact = contactE164;
+      r.trustedContact = { ...(r.trustedContact ?? { phone: contactE164 }), phone: contactE164 };
+    },
+
+    async setCodeword(userId: string, codeword: string): Promise<void> {
+      const r = row(userId);
+      r.codeword = codeword;
+      if (r.emergencyCode) r.emergencyCode = { ...r.emergencyCode, phrase: codeword };
     },
 
     async setHome(userId: string, lat: number, lon: number): Promise<void> {
       const r = row(userId);
       r.homeLat = lat;
       r.homeLon = lon;
-    async setHome(userId, lat, lon) {
-      const row = byId.get(userId);
-      if (!row) throw new Error(`unknown user ${userId}`);
-      row.homeLat = lat;
-      row.homeLon = lon;
     },
-    async getByHandle(handle) {
+
+    async getByHandle(handle: string): Promise<UserRecord | null> {
       const id = handleToId.get(handle);
       if (!id) return null;
       return byId.get(id) ?? null;
     },
-    async getById(userId) {
+
+    async getById(userId: string): Promise<UserRecord | null> {
       return byId.get(userId) ?? null;
+    },
+  };
+}
+
+/**
+ * Tiger-backed store with an in-process overlay for Person A settings fields
+ * that are not yet columns in `users` (monitoringMode, escalation, …).
+ * contact/codeword stay synced to Tiger.
+ */
+function wrapTigerWithSettings(tiger: UserStore): UserStore {
+  const settings = new Map<string, Partial<UserRecord>>();
+
+  function merge(base: UserRecord | null): UserRecord | null {
+    if (!base) return null;
+    const overlay = settings.get(base.userId);
+    if (!overlay) return base;
+    return { ...base, ...overlay };
+  }
+
+  return {
+    async upsertUser(handle: string) {
+      return merge(await tiger.upsertUser(handle))!;
+    },
+
+    async updateUser(userId: string, patch: UserPatch) {
+      const prev = settings.get(userId) ?? {};
+      const next: Partial<UserRecord> = { ...prev };
+      applyPatch(next as UserRecord, patch);
+      settings.set(userId, next);
+
+      if (patch.trustedContact?.phone || patch.contact) {
+        await tiger.setContact(userId, patch.trustedContact?.phone ?? patch.contact!);
+      }
+      if (patch.emergencyCode?.phrase || patch.codeword) {
+        await tiger.setCodeword(
+          userId,
+          patch.emergencyCode?.phrase ?? patch.codeword!,
+        );
+      }
+      if (patch.displayName !== undefined) {
+        // display_name is Tiger-only via upsertDemoUser for now; keep in overlay
+      }
+    },
+
+    async setContact(userId: string, contactE164: string) {
+      await tiger.setContact(userId, contactE164);
+      const prev = settings.get(userId) ?? {};
+      settings.set(userId, {
+        ...prev,
+        contact: contactE164,
+        trustedContact: {
+          ...(prev.trustedContact ?? { phone: contactE164 }),
+          phone: contactE164,
+        },
+      });
+    },
+
+    async setCodeword(userId: string, codeword: string) {
+      await tiger.setCodeword(userId, codeword);
+      const prev = settings.get(userId) ?? {};
+      settings.set(userId, { ...prev, codeword });
+    },
+
+    async setHome(userId: string, lat: number, lon: number) {
+      await tiger.setHome(userId, lat, lon);
+    },
+
+    async getByHandle(handle: string) {
+      return merge(await tiger.getByHandle(handle));
+    },
+
+    async getById(userId: string) {
+      return merge(await tiger.getById(userId));
     },
   };
 }
 
 export function createUserStore(): UserStore {
   if (process.env.DATABASE_URL?.trim()) {
-    return createTigerUserStore();
+    return wrapTigerWithSettings(createTigerUserStore());
   }
   return createMemoryUserStore();
 }
