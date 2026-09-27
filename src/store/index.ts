@@ -106,9 +106,10 @@ function wrapTigerWithSettings(tiger: UserStore): UserStore {
 
   function merge(base: UserRecord | null): UserRecord | null {
     if (!base) return null;
-    const overlay = settings.get(base.userId);
-    if (!overlay) return base;
-    return { ...base, ...overlay };
+    // Overlay is in-memory; after a restart only Tiger's contact column survives.
+    const restored: Partial<UserRecord> =
+      base.contact ? { trustedContact: { phone: base.contact } } : {};
+    return { ...base, ...restored, ...settings.get(base.userId) };
   }
 
   return {

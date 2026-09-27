@@ -14,6 +14,7 @@ import type {
 import { toCell } from "../shared/cell.ts";
 import { distanceM, pathLengthM, speedMps } from "../shared/geo.ts";
 import { templates, templateForTag } from "../shared/templates.ts";
+import { escalationSteps } from "../shared/settings.ts";
 import type { UserRecord } from "../store/types.ts";
 import {
   insertEvent,
@@ -621,6 +622,40 @@ export function createBrainEngine(deps: BrainDeps) {
         await logRule(deps, user.userId, "R9a", rt.walkId);
         return rt.pendingActions;
       }
+    }
+
+    // Emergency word: skip check-ins and run exactly the action the user chose.
+    // No acknowledgement text, so the word stays discreet.
+    if (event.type === "EmergencyCode") {
+      const code = user.emergencyCode;
+      if (!code) {
+        console.warn("[brain] EmergencyCode but no emergency word configured for", user.userId);
+        return rt.pendingActions;
+      }
+      const last = rt.pings[rt.pings.length - 1];
+      const lat = last?.lat ?? user.homeLat ?? 0;
+      const lon = last?.lon ?? user.homeLon ?? 0;
+      const steps = escalationSteps(code.action);
+      if (steps[0] === "CONTACT_TRUSTED") {
+        alert(rt, user.userId, templates.alertContactHelp, lat, lon);
+      } else {
+        if (!rt.walkId) await beginWalk(deps, rt, user, now, "emergency", lat, lon);
+        rt.phase = "CALLING";
+        startCall(rt, user.userId, rt.walkId!, {
+          displayName: user.displayName ?? "friend",
+          street: rt.lastShortAddress ?? "nearby",
+          minutesWalking: rt.walkStartedAt
+            ? (now.getTime() - rt.walkStartedAt.getTime()) / 60000
+            : 0,
+          walkId: rt.walkId!,
+        });
+        // TODO(L4): for CALL_THEN_CONTACT, alert the contact when the call goes unanswered.
+      }
+      await logRule(deps, user.userId, "R13", rt.walkId, {
+        via: "emergency_word",
+        action: code.action,
+      });
+      return rt.pendingActions;
     }
 
     if (event.type === "CallEvent") {

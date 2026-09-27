@@ -10,6 +10,7 @@
     "db:migrate": "bun run src/scripts/migrate.ts",
     "seed:user": "bun run src/scripts/seed-user.ts",
     "seed:history": "bun run src/scripts/seed-history.ts",
+    "send:test": "bun run src/scripts/send-test.ts",
     "sim:l1": "bun run src/sim/scenarios/l1.ts",
     "sim:l2": "bun run src/sim/scenarios/l2.ts",
     "sim:l3": "bun run src/sim/scenarios/l3.ts",

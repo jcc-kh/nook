@@ -23,7 +23,11 @@ if (brainMode === "echo") {
   const { createBrain: createStub } = await import("./brain/stubEmpty.ts");
   brain = createStub({ clock });
 } else {
-  brain = createBrain({ clock });
+  if (!process.env.DATABASE_URL?.trim()) {
+    throw new Error("BRAIN_MODE=live needs DATABASE_URL (Tiger). Use BRAIN_MODE=echo to test without a database.");
+  }
+  // Same store as onboarding so the brain sees trustedContact / emergencyCode / monitoringMode.
+  brain = createBrain({ clock, getUser: (userId) => users.getById(userId) });
 }
 
 const messenger = await createSpectrumMessenger({
