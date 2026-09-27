@@ -1,12 +1,11 @@
 import { distanceM, distanceToPolylineM } from "../shared/geo.ts";
 import {
-  findNearbySafePlace,
   getWalkingRoute,
   type LatLon,
   type RouteStep,
   type WalkingRoute,
 } from "./geoapify.ts";
-import { guideToSafePlace } from "./safePlace.ts";
+import { guideToSafePlace, SAFE_PLACE } from "./safePlace.ts";
 
 /**
  * One active walk's guide. The server owns which step is next.
@@ -152,20 +151,15 @@ async function startGuidance(
   apiKey: string,
   excludeName?: string,
 ): Promise<GuidanceResult> {
-  let place;
-  try {
-    place = await findNearbySafePlace(apiKey, here, excludeName);
-  } catch (err) {
-    console.error("[guidance] places failed", err instanceof Error ? err.message : err);
-    return { ok: false, status: "no_place", say: ["I couldn't look that up just now. Walk a little and I'll try again."] };
-  }
-  if (!place) {
-    return {
-      ok: false,
-      status: "no_place",
-      say: ["I couldn't find a place open all night from here. Walk another block and I'll look again."],
-    };
-  }
+  // Demo: always Morton Williams, then a real walking route from the live fix.
+  const place = {
+    name: SAFE_PLACE.name,
+    lat: SAFE_PLACE.lat,
+    lon: SAFE_PLACE.lon,
+    distanceM: distanceM(here.lat, here.lon, SAFE_PLACE.lat, SAFE_PLACE.lon),
+    categories: ["commercial.supermarket"],
+  };
+  void excludeName;
 
   let route: WalkingRoute | null;
   try {

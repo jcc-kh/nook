@@ -58,6 +58,7 @@ import {
   type WalkSafetyPatch,
 } from "../store/walks.ts";
 import { copy } from "../messenger/copy.ts";
+import { guideToSafePlace, SAFE_PLACE } from "../voice/safePlace.ts";
 import { parseCoordinates, parseMapsLink, parseYesNo } from "../messenger/parse.ts";
 import { query } from "../store/db.ts";
 import { classifyFallback as classifyText, reactionIntent } from "../llm/classify.ts";
@@ -594,6 +595,11 @@ function openingLine(
   const dest = tripDestinationName(rt);
   const toDest = dest === "home" ? "home" : `to ${dest}`;
   if (rt.safety === "immediate_danger") return `${hey} Are you somewhere safe right now?`;
+  if (rt.interim?.name === SAFE_PLACE.name) {
+    const last = rt.lastPing;
+    const guide = last ? guideToSafePlace(last.lat, last.lon) : null;
+    return guide ? `${hey} ${guide.say.join(" ")}` : `${hey} There's a Morton Williams open all night. I'll walk you there.`;
+  }
   switch (reason) {
     case "uneasy_companion":
     case "hands_free_guidance":
@@ -1403,6 +1409,16 @@ export function createBrainEngine(deps: BrainDeps) {
   }
 
   function startCall(rt: UserRuntime, user: UserRecord, now: Date, reason: CallReason) {
+    // Demo: every call walks them to the hardcoded Morton Williams pin.
+    rt.interim = {
+      name: SAFE_PLACE.name,
+      lat: SAFE_PLACE.lat,
+      lon: SAFE_PLACE.lon,
+      address: SAFE_PLACE.address,
+      source: "safe_place",
+    };
+    rt.routeChoice = "busier";
+    rt.destNearCount = 0;
     rt.phase = "CALLING";
     rt.channel = "voice";
     rt.callReason = reason;
@@ -2212,8 +2228,24 @@ export function createBrainEngine(deps: BrainDeps) {
       const last = found?.rt.lastPing;
       if (!found || !last) return { ok: false, error: "no live location for this walk" };
       if (!deps.nav) return { ok: false, error: "navigation isn't configured" };
-      const places = await deps.nav.findSafeDestinations(last);
-      found.rt.offeredPlaces = places.length ? places : null;
+      const meters = distanceM(last.lat, last.lon, SAFE_PLACE.lat, SAFE_PLACE.lon);
+      const places: SafePlaceOption[] = [
+        {
+          rank: 1,
+          id: "morton-williams",
+          name: SAFE_PLACE.name,
+          category: "grocery",
+          address: SAFE_PLACE.address,
+          lat: SAFE_PLACE.lat,
+          lon: SAFE_PLACE.lon,
+          openNow: true,
+          hours: SAFE_PLACE.open,
+          distanceM: Math.round(meters),
+          walkMin: Math.max(1, Math.round(meters / 80)),
+          source: "geoapify",
+        },
+      ];
+      found.rt.offeredPlaces = places;
       return {
         ok: true,
         source: deps.nav.providerName,
@@ -2228,9 +2260,7 @@ export function createBrainEngine(deps: BrainDeps) {
           walk_minutes: p.walkMin,
           distance_m: p.distanceM,
         })),
-        note: places.length
-          ? "These places are marked open all night in the map data. Offer at most the top two by name."
-          : "No place open all night was found nearby. Suggest staying on main, well-lit streets.",
+        note: "Demo: the only place is Morton Williams. Say that, then call set_destination with place_id morton-williams and speak the say line.",
       };
     });
   }
@@ -2251,7 +2281,24 @@ export function createBrainEngine(deps: BrainDeps) {
         rt.routeChoice = "destination";
         await persistSafety(deps, rt, { interim: null, routeChoice: "destination", ...(c === "home" && { destination: null }) });
       } else {
-        const option = rt.offeredPlaces?.find((p) => p.id.toLowerCase() === c || p.name.toLowerCase() === c || String(p.rank) === c);
+        const option =
+          rt.offeredPlaces?.find((p) => p.id.toLowerCase() === c || p.name.toLowerCase() === c || String(p.rank) === c) ??
+          (c === "morton-williams" || c === "morton williams" || c === "1"
+            ? {
+                rank: 1,
+                id: "morton-williams",
+                name: SAFE_PLACE.name,
+                category: "grocery" as const,
+                address: SAFE_PLACE.address,
+                lat: SAFE_PLACE.lat,
+                lon: SAFE_PLACE.lon,
+                openNow: true,
+                hours: SAFE_PLACE.open,
+                distanceM: 0,
+                walkMin: 1,
+                source: "geoapify" as const,
+              }
+            : undefined);
         if (!option) return { ok: false, error: "unknown place_id; call get_safe_destinations first" };
         rt.interim = { name: option.name, lat: option.lat, lon: option.lon, ...(option.address && { address: option.address }), source: "tool" };
         rt.routeChoice = "busier";

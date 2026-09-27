@@ -72,8 +72,9 @@ function speechFacts(data: unknown): SpeechFacts | null {
       p.minutes != null ? `${p.name}, about ${p.minutes} minutes away` : p.name,
     );
     const joined = bits.length === 1 ? `There's ${bits[0]}.` : `There's ${bits[0]}, or ${bits[1]}.`;
+    const hours = bits.length === 1 ? "It's open all night." : "Both are open all night.";
     return {
-      fallback: `${joined} Both are open all night.`,
+      fallback: `${joined} ${hours}`,
       mustInclude: places.flatMap((p) => (p.minutes != null ? [p.name, String(p.minutes)] : [p.name])),
       allowModel: true,
       brief: places.map((p) => `${p.name} open all night, ${p.minutes ?? "?"} minutes`).join("; "),
