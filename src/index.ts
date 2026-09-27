@@ -88,7 +88,9 @@ async function handleDevSim(req: Request, url: URL): Promise<Response> {
 
   if (url.pathname === "/dev/sim/stop") {
     const stopped = sim.stop(user.userId);
-    return Response.json({ ok: true, userId: user.userId, stopped });
+    // Synthetic positions must not linger (e.g. "away from home") once real pings resume.
+    await brain.resetUser?.(user.userId);
+    return Response.json({ ok: true, userId: user.userId, stopped, reset: Boolean(brain.resetUser) });
   }
 
   const scenario = body.scenario as ScenarioName | undefined;
@@ -101,6 +103,8 @@ async function handleDevSim(req: Request, url: URL): Promise<Response> {
   if (user.homeLat == null || user.homeLon == null) {
     return Response.json({ ok: false, error: "user has no home saved (text HOME first)" }, { status: 400 });
   }
+  sim.stop(user.userId);
+  await brain.resetUser?.(user.userId);
   const started = sim.start(
     user.userId,
     { lat: user.homeLat, lon: user.homeLon },

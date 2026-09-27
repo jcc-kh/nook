@@ -1202,6 +1202,19 @@ export function createBrainEngine(deps: BrainDeps) {
     return serialize(() => runTick(now));
   }
 
+  function resetUser(userId: string): Promise<void> {
+    return serialize(async () => {
+      await ensureHydrated(userId);
+      const rt = rtFor(userId);
+      if (rt.walkId) await endWalk(deps, rt, "ENDED_ELSEWHERE", deps.clock.now());
+      const fresh = emptyRuntime();
+      fresh.cooldownUntil = rt.cooldownUntil;
+      fresh.lastPromptAt = rt.lastPromptAt;
+      states.set(userId, fresh);
+      brainLog(deps, `reset ${userId}`);
+    });
+  }
+
   async function getLiveContext(walkId: string): Promise<LiveContext | null> {
     for (const [, rt] of states) {
       if (rt.walkId !== walkId) continue;
@@ -1228,7 +1241,7 @@ export function createBrainEngine(deps: BrainDeps) {
     return rtFor(userId);
   }
 
-  return { handle, tick, getLiveContext, getPhase, getRuntime, ensureHydrated };
+  return { handle, tick, resetUser, getLiveContext, getPhase, getRuntime, ensureHydrated };
 }
 
 const DEMO_FALLBACK = { lat: 40.8075, lon: -73.9626 };

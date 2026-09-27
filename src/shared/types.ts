@@ -147,6 +147,8 @@ export interface Brain {
   getLiveContext(walkId: string): Promise<LiveContext | null>;
   /** Time-based rules (reply timers, no-update, lateness). Called every 30 s. */
   tick?(now: Date): Promise<Action[]>;
+  /** Close any open walk and drop in-memory location state (dev sim stop). */
+  resetUser?(userId: string): Promise<void>;
 }
 
 // --- Walk plan (loaded once on enter WALKING) ---
