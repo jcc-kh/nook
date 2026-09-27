@@ -49,7 +49,7 @@ export type SendTextTag =
 
 // --- Events (edge → brain) ---
 
-export type Event = LocationPing | UserText | UserReaction | CallEvent;
+export type Event = LocationPing | UserText | UserReaction | CallEvent | EmergencyCodeEvent;
 
 export interface LocationPing {
   type: "LocationPing";
@@ -83,6 +83,17 @@ export interface CallEvent {
   userId: string;
   walkId: string;
   callType: "started" | "ended" | "silent_alert";
+  time: Date;
+}
+
+/**
+ * User sent their emergency word (said-on-a-call arrives as CallEvent
+ * `silent_alert` for now). Skips check-ins; brain runs `emergencyCode.action`.
+ */
+export interface EmergencyCodeEvent {
+  type: "EmergencyCode";
+  userId: string;
+  source: "text";
   time: Date;
 }
 

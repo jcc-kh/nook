@@ -17,6 +17,16 @@ export function createEchoBrain(): Brain {
           },
         ];
       }
+      if (event.type === "EmergencyCode") {
+        return [
+          {
+            type: "SendText",
+            userId: event.userId,
+            text: "(echo brain) emergency word received. The real brain would act on it now.",
+            tag: "nudge",
+          },
+        ];
+      }
       return [];
     },
 
