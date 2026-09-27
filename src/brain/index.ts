@@ -1,19 +1,39 @@
-import type { Action, Brain, Clock, Event, LiveContext } from "../shared/types.ts";
+import type { Brain, Clock } from "../shared/types.ts";
+import { createBrainEngine, type ParseReplyFn } from "./engine.ts";
+import type { UserRecord } from "../store/types.ts";
+import { createTigerUserStore } from "../store/users.ts";
+import { parseReplyFallback } from "../llm/index.ts";
 
 export interface CreateBrainOptions {
   clock: Clock;
+  getUser?: (userId: string) => Promise<UserRecord | null>;
+  parseReply?: ParseReplyFn;
+  persist?: boolean;
 }
 
-/** Empty brain: logs events, returns no actions. Person B replaces with real rules. */
-export function createBrain(_opts: CreateBrainOptions): Brain {
-  return {
-    async handle(event: Event): Promise<Action[]> {
-      console.log("[brain:stub]", event.type, "userId=", event.userId);
-      return [];
-    },
+export function createBrain(opts: CreateBrainOptions): Brain & {
+  getPhase: (userId: string) => string;
+  getRuntime: (userId: string) => unknown;
+} {
+  const store = createTigerUserStore();
+  const getUser =
+    opts.getUser ??
+    (async (userId: string) => store.getById(userId));
 
-    async getLiveContext(_walkId: string): Promise<LiveContext | null> {
-      return null;
-    },
+  const engine = createBrainEngine({
+    clock: opts.clock,
+    getUser,
+    parseReply: opts.parseReply ?? parseReplyFallback,
+    persist: opts.persist ?? true,
+  });
+
+  return {
+    handle: engine.handle,
+    getLiveContext: engine.getLiveContext,
+    getPhase: engine.getPhase,
+    getRuntime: engine.getRuntime,
   };
 }
+
+export { createBrainEngine } from "./engine.ts";
+export { createEchoBrain } from "./stubEcho.ts";

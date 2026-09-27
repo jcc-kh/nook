@@ -6,10 +6,21 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "smoke": "bun run src/smoke.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "bun run src/scripts/migrate.ts",
+    "seed:user": "bun run src/scripts/seed-user.ts",
+    "seed:history": "bun run src/scripts/seed-history.ts",
+    "sim:l1": "bun run src/sim/scenarios/l1.ts",
+    "sim:l2": "bun run src/sim/scenarios/l2.ts",
+    "sim:l3": "bun run src/sim/scenarios/l3.ts",
+    "sim:l4": "bun run src/sim/scenarios/l4.ts"
+  },
+  "dependencies": {
+    "pg": "^8.16.3"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/pg": "^8.15.5",
     "typescript": "^5.9.2"
   }
 }
