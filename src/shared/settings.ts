@@ -7,8 +7,6 @@ export type MonitoringMode = "MANUAL" | "EVENINGS" | "AWAY_FROM_HOME";
 
 export type NoResponseAction = "CALL_USER" | "CONTACT_TRUSTED" | "CALL_THEN_CONTACT" | "NONE";
 
-export type EmergencyAction = Exclude<NoResponseAction, "NONE">;
-
 export interface TrustedContact {
   name?: string;
   phone: string; // E.164
@@ -63,24 +61,17 @@ export function resolveTimeouts(t?: CheckinTimeouts): Required<CheckinTimeouts> 
   };
 }
 
-/** Override: skips the check-in entirely and runs `action` immediately. */
-export interface EmergencyCode {
-  phrase: string; // lowercase
-  action: EmergencyAction;
-}
-
 export interface UserSettings {
   monitoringMode?: MonitoringMode;
   trustedContact?: TrustedContact;
   escalation?: EscalationPolicy;
-  emergencyCode?: EmergencyCode;
   timeouts?: CheckinTimeouts;
 }
 
 export type EscalationStep = "CALL_USER" | "CONTACT_TRUSTED";
 
 /**
- * Ordered steps for a no-response policy or emergency action. Each step runs
+ * Ordered steps for a no-response policy. Each step runs
  * only if the user still hasn't responded to the previous one.
  */
 export function escalationSteps(action: NoResponseAction): EscalationStep[] {

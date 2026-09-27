@@ -2,12 +2,14 @@ import { SystemClock } from "./shared/clock.ts";
 import { createBrain } from "./brain/index.ts";
 import { createEchoBrain } from "./brain/stubEcho.ts";
 import { createLocations } from "./locations/index.ts";
+import { copy } from "./messenger/copy.ts";
 import { createInboundRouter } from "./messenger/onboarding.ts";
 import { createSpectrumMessenger, type Provider } from "./messenger/spectrum.ts";
 import { toE164 } from "./messenger/parse.ts";
 import { createUserStore } from "./store/index.ts";
+import { voiceConfigFromEnv } from "./voice/index.ts";
 import { createLiveSim, SCENARIOS, type ScenarioName } from "./sim/live.ts";
-import type { Brain, Event, LocationPing } from "./shared/types.ts";
+import { CALL_OUTCOMES, type Action, type Brain, type CallOutcome, type Event, type LocationPing } from "./shared/types.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const brainMode = (process.env.BRAIN_MODE ?? "live").toLowerCase();
@@ -28,7 +30,7 @@ if (brainMode === "echo") {
   if (!process.env.DATABASE_URL?.trim()) {
     throw new Error("BRAIN_MODE=live needs DATABASE_URL (Tiger). Use BRAIN_MODE=echo to test without a database.");
   }
-  // Same store as onboarding so the brain sees trustedContact / emergencyCode / monitoringMode.
+  // Same store as onboarding so the brain sees trustedContact / escalation / monitoringMode.
   brain = createBrain({ clock, getUser: (userId) => users.getById(userId) });
 }
 
@@ -39,15 +41,36 @@ const messenger = await createSpectrumMessenger({
   projectSecret,
 });
 
-async function dispatch(event: Event): Promise<void> {
-  try {
-    const actions = await brain.handle(event);
-    for (const action of actions) {
-      await messenger.execute(action).catch((err) => console.error(`[nook] ${action.type} failed`, err));
+/** One failed action never drops the rest. A call that can't be placed counts as unresolved. */
+async function runActions(actions: Action[]): Promise<void> {
+  for (const action of actions) {
+    try {
+      await messenger.execute(action);
+    } catch (err) {
+      console.error(`[nook] ${action.type} failed`, err);
+      if (action.type === "StartCall") {
+        await messenger.sendToUser(action.userId, copy.callFailed).catch(() => {});
+        await dispatch({
+          type: "CallEvent",
+          userId: action.userId,
+          walkId: action.walkId,
+          callType: "ended_unresolved",
+          time: clock.now(),
+        });
+      }
     }
+  }
+}
+
+async function dispatch(event: Event): Promise<void> {
+  let actions: Action[];
+  try {
+    actions = await brain.handle(event);
   } catch (err) {
     console.error(`[nook] failed handling ${event.type} for ${event.userId}`, err);
+    return;
   }
+  await runActions(actions);
 }
 
 let router: ReturnType<typeof createInboundRouter> | undefined;
@@ -114,6 +137,46 @@ async function handleDevSim(req: Request, url: URL): Promise<Response> {
   return Response.json({ ok: true, userId: user.userId, ...started });
 }
 
+/**
+ * ElevenLabs agent webhook tools. Parameters may arrive flat or under
+ * `parameters`; `user_id` / `walk_id` come from the call's dynamic variables.
+ */
+async function handleTool(req: Request, url: URL): Promise<Response> {
+  const secret = process.env.TOOLS_SECRET?.trim();
+  if (!secret || req.headers.get("x-tools-secret") !== secret) {
+    return new Response("unauthorized", { status: 401 });
+  }
+  if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+  const raw = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const params = (typeof raw.parameters === "object" && raw.parameters ? raw.parameters : raw) as Record<
+    string,
+    unknown
+  >;
+  const walkId = typeof params.walk_id === "string" ? params.walk_id : undefined;
+  const userId = typeof params.user_id === "string" ? params.user_id : undefined;
+  if (!walkId) return Response.json({ ok: false, error: "walk_id required" }, { status: 400 });
+
+  if (url.pathname === "/tools/location") {
+    const ctx = await brain.getLiveContext(walkId);
+    return ctx ? Response.json(ctx) : Response.json({ ok: false, error: "no live location" }, { status: 404 });
+  }
+
+  if (url.pathname === "/tools/call-outcome") {
+    const outcome = params.outcome as CallOutcome | undefined;
+    if (!outcome || !CALL_OUTCOMES.includes(outcome)) {
+      return Response.json({ ok: false, error: `outcome must be one of: ${CALL_OUTCOMES.join(", ")}` }, { status: 400 });
+    }
+    if (!userId || !(await users.getById(userId))) {
+      return Response.json({ ok: false, error: "unknown user_id" }, { status: 404 });
+    }
+    console.log(`[voice] ${userId} walk ${walkId}: ${outcome}`);
+    await dispatch({ type: "CallEvent", userId, walkId, callType: outcome, time: clock.now() });
+    return Response.json({ ok: true });
+  }
+
+  return new Response("not found", { status: 404 });
+}
+
 const locations = await createLocations({
   users,
   clock,
@@ -132,9 +195,7 @@ const ticker = setInterval(async () => {
   if (!brain.tick || ticking) return;
   ticking = true;
   try {
-    for (const action of await brain.tick(clock.now())) {
-      await messenger.execute(action).catch((err) => console.error(`[nook] ${action.type} failed`, err));
-    }
+    await runActions(await brain.tick(clock.now()));
   } catch (err) {
     console.error("[nook] tick failed", err);
   } finally {
@@ -143,7 +204,7 @@ const ticker = setInterval(async () => {
 }, TICK_MS);
 
 console.log(
-  `[nook] ready  PROVIDER=${provider}  BRAIN_MODE=${brainMode}  PORT=${port}  DB=${process.env.DATABASE_URL ? "yes" : "no"}  GEMINI=${process.env.USE_GEMINI === "0" || !process.env.GEMINI_API_KEY ? "off" : "on"}  DEV_SIM=${devSim ? "on" : "off"}`,
+  `[nook] ready  PROVIDER=${provider}  BRAIN_MODE=${brainMode}  PORT=${port}  DB=${process.env.DATABASE_URL ? "yes" : "no"}  GEMINI=${process.env.USE_GEMINI === "0" || !process.env.GEMINI_API_KEY ? "off" : "on"}  CALLS=${voiceConfigFromEnv() ? "on" : "off"}  DEV_SIM=${devSim ? "on" : "off"}`,
 );
 
 const server = Bun.serve({
@@ -156,6 +217,7 @@ const server = Bun.serve({
       }
       return handleDevSim(req, url);
     }
+    if (url.pathname.startsWith("/tools/")) return handleTool(req, url);
     if (url.pathname === "/health") {
       return Response.json({
         ok: true,

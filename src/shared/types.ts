@@ -35,13 +35,13 @@ export type RuleId =
   | "R10"
   | "R11"
   | "R12" // typed; unwired until L5
-  | "R13"
   | "R14"
   | "R15"
   | "R16";
 
 export type SendTextTag =
   | "prompt"
+  | "started"
   | "checkin"
   | "nudge"
   | "arrived"
@@ -49,7 +49,7 @@ export type SendTextTag =
 
 // --- Events (edge → brain) ---
 
-export type Event = LocationPing | UserText | UserReaction | CallEvent | EmergencyCodeEvent;
+export type Event = LocationPing | UserText | UserReaction | CallEvent;
 
 export interface LocationPing {
   type: "LocationPing";
@@ -78,22 +78,28 @@ export interface UserReaction {
   time: Date;
 }
 
+/**
+ * Call lifecycle from the voice agent. Picking up is not the same as being
+ * safe: only `resolved_safe` calls off a pending trusted-contact step.
+ * - `started`: the user answered; outcome still unknown.
+ * - `resolved_safe`: the user confirmed on the call that they're okay.
+ * - `request_escalation`: the user asked for their trusted contact to be reached.
+ * - `ended_unresolved`: hung up / dropped / unanswered / failed to place, without a safe outcome.
+ */
+export type CallOutcome = "started" | "resolved_safe" | "request_escalation" | "ended_unresolved";
+
+export const CALL_OUTCOMES: readonly CallOutcome[] = [
+  "started",
+  "resolved_safe",
+  "request_escalation",
+  "ended_unresolved",
+];
+
 export interface CallEvent {
   type: "CallEvent";
   userId: string;
   walkId: string;
-  callType: "started" | "ended" | "silent_alert";
-  time: Date;
-}
-
-/**
- * User sent their emergency word (said-on-a-call arrives as CallEvent
- * `silent_alert` for now). Skips check-ins; brain runs `emergencyCode.action`.
- */
-export interface EmergencyCodeEvent {
-  type: "EmergencyCode";
-  userId: string;
-  source: "text";
+  callType: CallOutcome;
   time: Date;
 }
 

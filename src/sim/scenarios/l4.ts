@@ -1,5 +1,5 @@
 /**
- * L4 suite: R11, R13, getLiveContext, resume from Tiger
+ * L4 suite: R11, call outcomes, getLiveContext, resume from Tiger
  */
 import { SimClock } from "../../shared/clock.ts";
 import { createBrainEngine } from "../../brain/engine.ts";
@@ -22,7 +22,6 @@ async function main() {
     userId: DEMO.userId,
     handle: DEMO.handle,
     contact: DEMO.contact,
-    codeword: DEMO.codeword,
     homeLat: DEMO.homeLat,
     homeLon: DEMO.homeLon,
     nightStart: DEMO.nightStart,
@@ -76,26 +75,26 @@ async function main() {
   assert(ctx!.street === "W 116th St", "getLiveContext street");
   console.log("getLiveContext ok", ctx);
 
-  // R13
+  // User asks on the call for their contact to be reached
   const alertActions = await brain.handle({
     type: "CallEvent",
     userId: DEMO.userId,
     walkId,
-    callType: "silent_alert",
+    callType: "request_escalation",
     time: clock.now(),
   });
   assert(
     alertActions.some((a) => a.type === "AlertContact"),
-    "R13: AlertContact",
+    "request_escalation: AlertContact",
   );
-  assert(brain.getPhase(DEMO.userId) === "CALLING", "R13: stay CALLING");
-  console.log("R13 ok");
+  assert(brain.getPhase(DEMO.userId) === "CALLING", "request_escalation: stay CALLING");
+  console.log("request_escalation ok");
 
   await brain.handle({
     type: "CallEvent",
     userId: DEMO.userId,
     walkId,
-    callType: "ended",
+    callType: "ended_unresolved",
     time: clock.now(),
   });
   assert(brain.getPhase(DEMO.userId) === "WALKING", "call ended → WALKING");

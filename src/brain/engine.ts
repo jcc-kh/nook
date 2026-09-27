@@ -61,6 +61,13 @@ const USUAL_CELLS_TTL_MS = 10 * 60_000;
 const FRIEND_END_MIN = 15;
 /** How far back to look for the last ping when resuming after a restart. */
 const HYDRATE_LOOKBACK_MS = 60 * 60_000;
+/** Open walks older than this are closed on resume instead of watched again. */
+const STALE_WALK_MS = 6 * 60 * 60_000;
+/** Ways to say "I'm heading out" that start a walk when none is open (R4). */
+const TRIP_START_RE =
+  /\b(walking home|heading (home|out|back)|on my way( home)?|going home|leaving now|start(ing)? (a |my )?(trip|walk))\b/;
+/** An answered call with a pending contact step escalates if no outcome arrives by then. */
+const CALL_OUTCOME_GUARD_MS = 15 * 60_000;
 
 export type ParseReplyFn = (text: string) => Promise<ParsedReply>;
 
@@ -117,11 +124,11 @@ interface UserRuntime {
   friendSince: Date | null;
   lastShortAddress?: string;
   /**
-   * CALL_THEN_CONTACT: alert the contact at `at` unless the call is picked up.
-   * R10 (missed check-in) is also cancelled by a 👍 / ok reply; R13 (emergency
-   * word) only by the call, so a coerced reply can't call it off.
+   * CALL_THEN_CONTACT: alert the contact at `at` unless the call resolves safe.
+   * Picking up only pushes `at` out to a guard for a lost end-of-call event.
+   * A 👍 / ok reply also cancels it.
    */
-  contactAfterCall: { at: Date; rule: "R10" | "R13"; kind: ContactAlertKind } | null;
+  contactAfterCall: { at: Date; rule: "R10" | "R11"; kind: ContactAlertKind } | null;
   pendingActions: Action[];
 }
 
@@ -228,7 +235,14 @@ function noResponseAction(user: UserRecord): NoResponseAction {
 
 /** How the trusted contact knows who the alert is about. */
 function userLabel(user: UserRecord): string {
-  return user.displayName ?? user.handle;
+  const phone = prettyPhone(user.handle);
+  return user.displayName ? `${user.displayName} (${phone})` : phone;
+}
+
+/** "+16463220667" → "+1 646-322-0667"; other handles unchanged. */
+function prettyPhone(handle: string): string {
+  const m = handle.match(/^\+1(\d{3})(\d{3})(\d{4})$/);
+  return m ? `+1 ${m[1]}-${m[2]}-${m[3]}` : handle;
 }
 
 function cellCenter(cell: string): { lat: number; lon: number } | null {
@@ -352,11 +366,11 @@ function canCheckin(rt: UserRuntime, now: Date): boolean {
 }
 
 /**
- * CALLING because a check-in went unanswered (not ‼️ / "call me" / the
- * emergency word): a 👍 or "ok" reply still counts as the user responding.
+ * CALLING because a check-in went unanswered (not ‼️ / "call me"): a 👍 or
+ * "ok" reply still counts as the user responding.
  */
 function awaitingCallReply(rt: UserRuntime): boolean {
-  return rt.phase === "CALLING" && rt.escalated && rt.contactAfterCall?.rule !== "R13";
+  return rt.phase === "CALLING" && rt.escalated;
 }
 
 function openCheckin(
@@ -569,6 +583,11 @@ export function createBrainEngine(deps: BrainDeps) {
       const open = await getOpenWalk(userId);
       if (!open) return;
       const now = deps.clock.now();
+      if (now.getTime() - open.startedAt.getTime() > STALE_WALK_MS) {
+        await updateWalkStatus(open.walkId, "ENDED_ELSEWHERE", now);
+        brainLog(deps, `closed stale ${open.walkId} for ${userId} (started ${open.startedAt.toISOString()})`);
+        return;
+      }
       const recent = (
         await loadRecentPings(userId, new Date(now.getTime() - HYDRATE_LOOKBACK_MS))
       ).filter((p) => p.time <= now);
@@ -668,6 +687,32 @@ export function createBrainEngine(deps: BrainDeps) {
     });
   }
 
+  /**
+   * The "then contact" step of CALL_THEN_CONTACT. `onCall`: the call is still
+   * up (user asked for escalation mid-call), so stay CALLING.
+   */
+  async function contactAfterCallNow(
+    rt: UserRuntime,
+    user: UserRecord,
+    reason: "timeout" | "ended_unresolved" | "request_escalation",
+    onCall: boolean,
+  ) {
+    const pending = rt.contactAfterCall;
+    if (!pending) return;
+    rt.contactAfterCall = null;
+    const last = rt.lastPing;
+    alert(
+      rt,
+      user.userId,
+      contactAlert(reason === "request_escalation" ? "help" : pending.kind, userLabel(user)),
+      last?.lat ?? user.homeLat ?? 0,
+      last?.lon ?? user.homeLon ?? 0,
+    );
+    rt.phase = onCall ? "CALLING" : "ALERTED";
+    await persistPhase(deps, rt);
+    await logRule(deps, user.userId, pending.rule, rt.walkId, { step: "contact_after_call", reason });
+  }
+
   /** Final step after check-in + nudge go unanswered, per the user's choice. */
   async function escalate(rt: UserRuntime, user: UserRecord, now: Date) {
     const action = noResponseAction(user);
@@ -730,21 +775,9 @@ export function createBrainEngine(deps: BrainDeps) {
       }
     }
 
-    // CALL_THEN_CONTACT: the call wasn't picked up, so reach the contact.
-    const pendingContact = rt.contactAfterCall;
-    if (pendingContact && now >= pendingContact.at) {
-      rt.contactAfterCall = null;
-      const lastFix = rt.lastPing;
-      alert(
-        rt,
-        user.userId,
-        contactAlert(pendingContact.kind, userLabel(user)),
-        lastFix?.lat ?? user.homeLat ?? 0,
-        lastFix?.lon ?? user.homeLon ?? 0,
-      );
-      if (rt.phase === "CALLING") rt.phase = "ALERTED";
-      await persistPhase(deps, rt);
-      await logRule(deps, user.userId, pendingContact.rule, rt.walkId, { step: "contact_after_call" });
+    // CALL_THEN_CONTACT: no safe outcome from the call in time, so reach the contact.
+    if (rt.contactAfterCall && now >= rt.contactAfterCall.at) {
+      await contactAfterCallNow(rt, user, "timeout", false);
     }
 
     // R8: no location update for noUpdateMin (walks, or away from home while watching)
@@ -1038,7 +1071,7 @@ export function createBrainEngine(deps: BrainDeps) {
       }
 
       // R4
-      if (lower.includes("walk me home")) {
+      if (lower.includes("walk me home") || (!rt.walkId && TRIP_START_RE.test(lower))) {
         if (rt.walkId) await endWalk(deps, rt, "ENDED_ELSEWHERE", now);
         const last = rt.lastPing;
         await beginWalk(
@@ -1050,6 +1083,7 @@ export function createBrainEngine(deps: BrainDeps) {
           last?.lat ?? user.homeLat ?? DEMO_FALLBACK.lat,
           last?.lon ?? user.homeLon ?? DEMO_FALLBACK.lon,
         );
+        send(rt, user.userId, "started", templates.started);
         await logRule(deps, user.userId, "R4", rt.walkId);
         return rt.pendingActions;
       }
@@ -1142,6 +1176,7 @@ export function createBrainEngine(deps: BrainDeps) {
             last?.lat ?? user.homeLat ?? 0,
             last?.lon ?? user.homeLon ?? 0,
           );
+          send(rt, user.userId, "started", templates.started);
           await logRule(deps, user.userId, "R3", rt.walkId, { reply: "like" });
         } else {
           rt.phase = "IDLE";
@@ -1163,63 +1198,39 @@ export function createBrainEngine(deps: BrainDeps) {
       }
     }
 
-    // Emergency word: skip check-ins and run exactly the action the user chose.
-    // No acknowledgement text, so the word stays discreet.
-    if (event.type === "EmergencyCode") {
-      const code = user.emergencyCode;
-      if (!code) {
-        console.warn("[brain] EmergencyCode but no emergency word configured for", user.userId);
-        return rt.pendingActions;
-      }
-      const last = rt.lastPing;
-      const lat = last?.lat ?? user.homeLat ?? 0;
-      const lon = last?.lon ?? user.homeLon ?? 0;
-      const steps = escalationSteps(code.action);
-      if (steps[0] === "CONTACT_TRUSTED") {
-        alert(rt, user.userId, contactAlert("help", userLabel(user)), lat, lon);
-      } else {
-        if (!rt.walkId) await beginWalk(deps, rt, user, now, "emergency", lat, lon);
-        rt.phase = "CALLING";
-        startCall(rt, user.userId, rt.walkId!, callVars(rt, user, now));
-        rt.contactAfterCall = steps.includes("CONTACT_TRUSTED")
-          ? {
-              at: new Date(now.getTime() + resolveTimeouts(user.timeouts).escalateAfterSec * 1000),
-              rule: "R13",
-              kind: "help",
-            }
-          : null;
-      }
-      await logRule(deps, user.userId, "R13", rt.walkId, {
-        via: "emergency_word",
-        action: code.action,
-      });
-      return rt.pendingActions;
-    }
-
     if (event.type === "CallEvent") {
-      if (event.callType === "silent_alert") {
-        const last = rt.lastPing;
-        alert(
-          rt,
-          user.userId,
-          contactAlert("help", userLabel(user)),
-          last?.lat ?? user.homeLat ?? 0,
-          last?.lon ?? user.homeLon ?? 0,
-        );
-        rt.phase = "CALLING";
-        rt.contactAfterCall = null;
-        await logRule(deps, user.userId, "R13", event.walkId);
-        return rt.pendingActions;
-      }
-      if (event.callType === "ended") {
-        if (rt.phase === "CALLING") rt.phase = "WALKING";
-        return rt.pendingActions;
-      }
       if (event.callType === "started") {
         rt.phase = "CALLING";
         rt.walkId = event.walkId;
-        // The user picked up, so the "then contact" step is off.
+        // Answering isn't the same as being safe: keep the contact step until an outcome.
+        if (rt.contactAfterCall) {
+          rt.contactAfterCall.at = new Date(now.getTime() + CALL_OUTCOME_GUARD_MS);
+        }
+        return rt.pendingActions;
+      }
+      if (event.callType === "resolved_safe") {
+        const cancelled = rt.contactAfterCall;
         rt.contactAfterCall = null;
+        if (rt.walkId) resumeWalking(rt, now);
+        await persistPhase(deps, rt);
+        if (cancelled) {
+          await logRule(deps, user.userId, cancelled.rule, rt.walkId, { step: "contact_cancelled", reason: "resolved_safe" });
+        }
+        return rt.pendingActions;
+      }
+      if (event.callType === "request_escalation") {
+        // No contact step queued (‼️, "call me", CALL_USER): they asked, so reach the contact anyway.
+        rt.contactAfterCall ??= { at: now, rule: "R11", kind: "help" };
+        await contactAfterCallNow(rt, user, "request_escalation", true);
+        return rt.pendingActions;
+      }
+      if (event.callType === "ended_unresolved") {
+        if (rt.contactAfterCall) {
+          await contactAfterCallNow(rt, user, "ended_unresolved", false);
+        } else if (rt.phase === "CALLING") {
+          rt.phase = "WALKING";
+          await persistPhase(deps, rt);
+        }
         return rt.pendingActions;
       }
     }

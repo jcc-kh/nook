@@ -27,11 +27,11 @@ Docs index: [https://photon.codes/docs/llms.txt](https://photon.codes/docs/llms.
 
 1. No LLM call on the location-ping path. Rules are deterministic code.
 2. Personalization = numbers from Tiger (typical walk time, known stops, usual route) loaded once per walk into a `WalkPlan`.
-3. Safety floors always act and ignore personalization: an unanswered check-in (R10), no location updates (R8), ‼️ / "call me" (R11), the emergency word (R13). The user's settings decide *which* action a floor takes (call, contact, both, or a final nudge), never *whether* it acts.
+3. Safety floors always act and ignore personalization: an unanswered check-in (R10), no location updates (R8), ‼️ / "call me" (R11), a "help" reply (R9b). The user's settings decide *which* action a floor takes (call, contact, both, or a final nudge), never *whether* it acts.
 4. Every fired rule is logged to `events` with a `rule_id`.
 5. Injectable clock + GPS simulator: the demo never depends on real GPS/time.
 6. Gemini failures fall back to message templates.
-7. The trusted contact is texted only when something is wrong (escalation, "help", the emergency word). No "made it home" or "ended elsewhere" texts to the contact.
+7. The trusted contact is texted only when something is wrong (escalation, "help", or the user asking for them on a call). After each contact alert the user is told the contact was texted. No "made it home" or "ended elsewhere" texts to the contact.
 8. User settings are deterministic and structured (`UserSettings`), set in onboarding or by text, confirmed before saving, and stored in Tiger.
 
 ## Architecture
@@ -78,7 +78,9 @@ messenger.execute(action)
 
 Edge → brain: events. Brain → edge: actions. Edge → brain query: `getLiveContext(walkId)`.
 
-Inbound texts go through the deterministic onboarding / settings router (`messenger/onboarding.ts`) first. The emergency word is matched there (whole word, anywhere in a message) and becomes an `EmergencyCode` event. Anything that isn't onboarding or a settings intent is dispatched to the brain as `UserText`.
+Inbound texts go through the deterministic onboarding / settings router (`messenger/onboarding.ts`) first. Anything that isn't onboarding or a settings intent is dispatched to the brain as `UserText`. In-thread replies (Spectrum `reply` content) and shared contact cards are flattened to text first, and Nook answers inside the same thread.
+
+Actions run in order through `runActions` (`index.ts`). If `StartCall` throws (ElevenLabs not configured or the request fails), the user is texted that the call couldn't be placed and the brain receives `CallEvent` `ended_unresolved`, so a pending contact step still fires.
 
 ### State machine
 
@@ -97,7 +99,8 @@ stateDiagram-v2
   ALERTED --> WALKING: thumbs up or ok text
   WALKING --> CALLING: emphasize or call me
   CHECKING_IN --> CALLING: emphasize or help
-  CALLING --> WALKING: call ended
+  CALLING --> WALKING: resolved safe, or ended with nothing pending
+  CALLING --> ALERTED: ended unresolved / no answer, contact step pending
   WALKING --> ARRIVED: near home
   CHECKING_IN --> ARRIVED: near home
   WALKING --> ENDED_ELSEWHERE: friend stop
@@ -121,20 +124,20 @@ src/
     types.ts       # events, actions, phases, walk plan, RuleId — write first, both
     clock.ts       # SystemClock, SimClock
     templates.ts   # canned strings when Gemini absent/fails
-    settings.ts    # UserSettings (monitoring, contact, escalation, emergency word, timeouts)
+    settings.ts    # UserSettings (monitoring, contact, escalation, timeouts)
   messenger/       # Spectrum inbound → events; execute(action)
     onboarding.ts  # deterministic onboarding + settings router (confirm before save)
     parse.ts       # keyword parsers (contact, choices, yes/no, durations, intents)
     copy.ts        # every onboarding / settings string
   locations/       # im.locations watch → LocationPing
-  voice/           # startCall; POST /tools/location, /tools/silent-alert
+  voice/           # placeCall (ElevenLabs Twilio outbound); tool routes live in index.ts
   store/           # schema.sql, Tiger client, baselines / known stops / usual cells
   brain/           # ping window, state machine, rules, timers, walk-plan builder
   llm/             # writeMessages(plan), parseReply(text) — NOT imported by ping rules
   sim/             # GPS route playback, clock override, seed (2 weeks), live.ts (real-time feed)
   scripts/         # migrate, seed-history, sim-live, events-tail, send-test
   dashboard/       # L5 only; reads events
-  index.ts         # PROVIDER=terminal|imessage; HTTP /health (+ /dev/sim with DEV_SIM=1); 30 s ticker
+  index.ts         # PROVIDER=terminal|imessage; HTTP /health, /tools/* (+ /dev/sim with DEV_SIM=1); 30 s ticker
 Dockerfile         # preferred App Platform build (Bun or Node)
 .do/app.yaml       # optional App Platform spec
 ```
@@ -185,13 +188,13 @@ export type RuleId =
   | "R10"
   | "R11"
   | "R12" // typed; unwired until L5
-  | "R13"
   | "R14"
   | "R15"
   | "R16";
 
 export type SendTextTag =
   | "prompt"
+  | "started" // walk acknowledged (R3 👍, R4)
   | "checkin"
   | "nudge"
   | "arrived"
@@ -203,8 +206,7 @@ export type Event =
   | LocationPing
   | UserText
   | UserReaction
-  | CallEvent
-  | EmergencyCodeEvent;
+  | CallEvent;
 
 export interface LocationPing {
   type: "LocationPing";
@@ -233,24 +235,18 @@ export interface UserReaction {
   time: Date;
 }
 
+/** Picking up is not being safe: only `resolved_safe` calls off a pending contact step. */
+export type CallOutcome =
+  | "started"            // user answered; outcome unknown
+  | "resolved_safe"      // user confirmed on the call they're okay
+  | "request_escalation" // user asked for their trusted contact to be reached
+  | "ended_unresolved";  // hung up / dropped / unanswered / failed to place, without a safe outcome
+
 export interface CallEvent {
   type: "CallEvent";
   userId: string;
   walkId: string;
-  callType: "started" | "ended" | "silent_alert";
-  time: Date;
-}
-
-/**
- * User sent their emergency word (matched by the onboarding router, whole
- * word, anywhere in a message). The brain skips check-ins and runs
- * `user.emergencyCode.action` immediately, with no acknowledgement text.
- * Logged as R13.
- */
-export interface EmergencyCodeEvent {
-  type: "EmergencyCode";
-  userId: string;
-  source: "text";
+  callType: CallOutcome;
   time: Date;
 }
 
@@ -341,7 +337,6 @@ Set during onboarding or by texting later; read by the brain through `UserRecord
 ```ts
 export type MonitoringMode = "MANUAL" | "EVENINGS" | "AWAY_FROM_HOME";
 export type NoResponseAction = "CALL_USER" | "CONTACT_TRUSTED" | "CALL_THEN_CONTACT" | "NONE";
-export type EmergencyAction = Exclude<NoResponseAction, "NONE">;
 
 export interface TrustedContact { name?: string; phone: string /* E.164 */ }
 
@@ -350,9 +345,6 @@ export interface EscalationPolicy {
   initialAction: "TEXT_USER";
   onNoTextResponse: NoResponseAction;
 }
-
-/** Skips the check-in entirely and runs `action` immediately. */
-export interface EmergencyCode { phrase: string /* lowercase */; action: EmergencyAction }
 
 /** Defaults 60 s / 60 s / 3 min; clamped to 30–600 s and 2–15 min. */
 export interface CheckinTimeouts {
@@ -365,12 +357,11 @@ export interface UserSettings {
   monitoringMode?: MonitoringMode;
   trustedContact?: TrustedContact;
   escalation?: EscalationPolicy;
-  emergencyCode?: EmergencyCode;
   timeouts?: CheckinTimeouts;
 }
 ```
 
-`escalationSteps(action)` expands an action into ordered steps (`CALL_THEN_CONTACT` → call, then contact). Calls are log-only until ElevenLabs is wired (L4). Defaults when a setting is missing: monitoring behaves as `EVENINGS`; escalation is `CONTACT_TRUSTED` if a contact exists, else `NONE`.
+`escalationSteps(action)` expands an action into ordered steps (`CALL_THEN_CONTACT` → call, then contact). Calls go out through ElevenLabs when `ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` and `ELEVENLABS_AGENT_PHONE_NUMBER_ID` are set; otherwise a `StartCall` counts as a failed call. Defaults when a setting is missing: monitoring behaves as `EVENINGS`; escalation is `CONTACT_TRUSTED` if a contact exists, else `NONE`.
 
 ---
 
@@ -378,11 +369,11 @@ export interface UserSettings {
 
 Full SQL provided separately; paste into `src/store/schema.sql`.
 
-- `users(user_id, handle, home geog, contact, codeword, night_start, night_end, tz, display_name, ...)`
-  - Settings columns (added with `ADD COLUMN IF NOT EXISTS`): `trusted_name`, `monitoring_mode`, `escalation_on_no_response`, `emergency_action`, `nudge_after_sec`, `escalate_after_sec`, `no_update_min`, `onboarded_at`.
-  - `contact` is the trusted contact's phone and `codeword` is the emergency word. An emergency word only counts when `emergency_action` is also set.
+- `users(user_id, handle, home geog, contact, night_start, night_end, tz, display_name, ...)`
+  - Settings columns (added with `ADD COLUMN IF NOT EXISTS`): `trusted_name`, `monitoring_mode`, `escalation_on_no_response`, `nudge_after_sec`, `escalate_after_sec`, `no_update_min`, `onboarded_at`.
+  - `contact` is the trusted contact's phone.
 - `location_pings` hypertable `(time, user_id, lat, lon, accuracy_m, geom, cell, walk_id)`
-- `walks(walk_id, user_id, trigger, started_at, ended_at, origin_cell, duration_s, status)`. `trigger` is `prompt` / `walk_me_home` / `watch` (opened by a passive check) / `call_me` / `help` / `emergency`.
+- `walks(walk_id, user_id, trigger, started_at, ended_at, origin_cell, duration_s, status)`. `trigger` is `prompt` / `walk_me_home` / `watch` (opened by a passive check) / `call_me` / `help`.
 - `confirmed_cells(user_id, cell, created_at)`: off-route stretches the user confirmed; part of their usual route from then on.
 - `stops(...)`, `place_labels(...)`, `events` hypertable `(..., rule_id, detail jsonb)`
 - `presence_hourly` CAGG; views `walk_baselines` (p50/p90 by origin), `known_stops`
@@ -400,8 +391,8 @@ Full SQL provided separately; paste into `src/store/schema.sql`.
 | R1 | Not watching and no walk: pings are stored, nothing is sent |
 | R2 | IDLE, watching, speed 0.7–2.2 m/s for 2 min, moved ≥120 m, >150 m from home, no prompt in 2 h → prompt |
 | R2x | Speed >3 m/s = vehicle → skip prompt |
-| R3 | 👍 start walk \| 👎 cooldown 2 h \| none in 10 min → cooldown 1 h |
-| R4 | Text "walk me home" → start walk any time (closes any walk still open) |
+| R3 | 👍 start walk (with a "started" ack) \| 👎 cooldown 2 h \| none in 10 min → cooldown 1 h |
+| R4 | Text "walk me home" → start walk any time (closes any walk still open). With no walk open, trip phrases also start one: "walking home", "heading home / out / back", "on my way (home)", "going home", "leaving now", "start(ing) my walk / trip". Replies with the "started" ack. This is how `MANUAL` users start being watched |
 | R5a | Stationary near known stop: silent until allowed dwell |
 | R5b | Stationary 3 min elsewhere (2 min after midnight): soft check-in |
 | R6 | >200 m from every usual cell for 2 min, on a walk or passive: off-route check-in. Usual cells = ping cells of past walks that ended `ARRIVED` + `confirmed_cells` (200 m ≈ one-cell buffer). Skipped with <3 arrived walks and no confirmed cells. 👍 or an "ok" reply confirms: the stretch's cells go to `confirmed_cells` (plus a place label if named) and the rest of that trip is added too. No reply: R10 escalation |
@@ -410,10 +401,9 @@ Full SQL provided separately; paste into `src/store/schema.sql`.
 | R8 | No location update for `noUpdateMin` (default 3) while walking, or passive: check-in. Timer-driven; once per silence. No reply: R10 escalation (**floor**) |
 | R9a | 👍 to check-in (or after an alert): resume; no check-in for 10 min |
 | R9b | Free text → Gemini / regex: ok (save place label; confirms off-route) \| help (call + alert contact) \| unclear ("Didn't catch that", timers keep running) |
-| R10 | No reply `nudgeAfterSec` (60): nudge; +`escalateAfterSec` (60): the user's `onNoTextResponse`. `CONTACT_TRUSTED` → alert contact with location; `CALL_USER` / `CALL_THEN_CONTACT` → `StartCall` (log-only until L4); `CALL_THEN_CONTACT` then alerts the contact `escalateAfterSec` later unless the call is picked up (`CallEvent` started) or the user 👍s / replies ok (the emergency word's `CALL_THEN_CONTACT` is cancelled only by the call); `NONE` → one final nudge, then stop (**floor**). The nudge tells the user their next step and its timing |
+| R10 | No reply `nudgeAfterSec` (60): nudge; +`escalateAfterSec` (60): the user's `onNoTextResponse`. `CONTACT_TRUSTED` → alert contact with location; `CALL_USER` / `CALL_THEN_CONTACT` → `StartCall`; `CALL_THEN_CONTACT` then alerts the contact unless the call resolves safe: `ended_unresolved` (including a call that couldn't be placed), `request_escalation`, or no outcome within `escalateAfterSec` → alert now; `started` only postpones it (15 min guard for a lost outcome event); `resolved_safe` or a 👍 / ok reply cancels it. `request_escalation` on any call (including ‼️ / "call me") alerts the contact; `NONE` → one final nudge, then stop (**floor**). The nudge tells the user their next step and its timing |
 | R11 | ‼️ or "call me": ElevenLabs call immediately (**floor**) |
 | R12 | ❓ → nearest open place (extension / L5 only) |
-| R13 | Emergency word (text) → run `emergencyCode.action` now, no check-in, no acknowledgement; or `silent_alert` call tool → alert contact, call continues (**floor**) |
 | R14 | Within 50 m of home, 2 pings, on a walk (or passive after ≥2 pings away): text the user "I see that you got home safe. Have a good rest!", close walk. No contact text |
 | R15 | Friend place >15 min or reply says so: end walk quietly. No contact text |
 | R16 | Max one check-in per 3 min; none while CALLING |
@@ -427,7 +417,10 @@ Full SQL provided separately; paste into `src/store/schema.sql`.
 - **Target:** App Platform Web Service connected to GitHub. Not Functions, not scale-to-zero.
 - **Instances:** min = 1, max = 1. In-memory ping window and walk phase must not split across replicas.
 - **Process model:** one container runs HTTP + Spectrum loop + `im.locations.watch`. Restart rebuilds the window from recent Tiger pings and resumes open walks via `walks.status`.
-- **HTTP:** `/health` (health check), `/tools/location`, `/tools/silent-alert` (shared secret header).
+- **HTTP:** `/health` (health check), plus the ElevenLabs webhook tools, both `POST` with header `x-tools-secret: $TOOLS_SECRET` and parameters flat or under `parameters`:
+  - `/tools/location` `{ walk_id }` → `getLiveContext` JSON (`street`, `lat`, `lon`, `minutesWalking`).
+  - `/tools/call-outcome` `{ user_id, walk_id, outcome }` with `outcome` one of `started` / `resolved_safe` / `request_escalation` / `ended_unresolved` → `CallEvent`.
+  - `user_id` and `walk_id` arrive as call dynamic variables (`placeCall` sends `user_id`, `walk_id`, `display_name`, `street`, `minutes_walking`). Bind them in the agent's tool config so the model never makes them up.
 - **Secrets (env):** `SPECTRUM_PROJECT_ID`, `SPECTRUM_PROJECT_SECRET`, Tiger connection string, `GEMINI_API_KEY`, `ELEVENLABS_API_KEY`, agent/phone ids, tools shared secret, `PROVIDER`.
 - **Public URL:** App Platform HTTPS for ElevenLabs tool webhooks. ngrok only for local L4 before first deploy.
 - **Build:** Prefer `Dockerfile` (Bun or Node). Avoid relying on DO buildpacks for Bun. Optional `.do/app.yaml`.
@@ -443,18 +436,20 @@ Full SQL provided separately; paste into `src/store/schema.sql`.
 1. `src/shared/types.ts`, `clock.ts`, `templates.ts`
 2. Empty `handle` that returns `[]` and logs the event
 3. Onboarding (deterministic, `messenger/onboarding.ts`; no LLM):
-   - First inbound message creates the user; Nook introduces itself and sends the Find My request card (or says sharing is already connected).
-   - Questions, one at a time: trusted contact (name + phone) → when to monitor (1 only when I start a trip / 2 evenings / 3 whenever I'm away from home) → what to do if a check-in goes unanswered (1 call me / 2 contact them / 3 call then contact / 4 nothing further) → offer an emergency word (yes/no) → the word → what it does (call / contact / call then contact).
+   - First inbound message creates the user. Nook sends exactly one message per turn and waits for the user's reply before the next question. The first message is the intro plus the first question.
+   - Steps: the user's name (saved as `display_name`; shown to the trusted contact as "Alex (+1 646-555-1234)" in every alert, and used by the call agent) → trusted contact → when to monitor (1 only when I start a trip / 2 evenings / 3 whenever I'm away from home) → what to do if a check-in goes unanswered (1 call me / 2 contact them / 3 call then contact / 4 nothing further) → share location (the Find My card follows the question; skipped if already sharing; "skip" defers it; onboarding moves on by itself when the first fix arrives) → "are you at home right now?" (only once a fix exists and no home is saved; yes saves it) → recap.
+   - Contact: name + number in one message, a number alone (then "What's their name?"), a name alone (then "What's Sam's phone number?"), or a shared contact card. Works as a normal message or an in-thread reply.
+   - Validation: US numbers must be valid NANP (area code and exchange start 2–9); other countries need `+` and 8–15 digits. The user's own number is rejected. Names must look like a name (letters, up to 3 words; "ok", "idk" and the like are rejected).
    - `HOME` any time while a fix is live writes `users.home`.
    - Night window defaults `22:00–06:00` in `users.tz`.
-   - After onboarding, texting `settings` shows a summary (monitoring, contact, escalation, emergency word, check-in timing, home). Changes by text: "only monitor when I start a trip", "change my trusted contact", "don't contact anyone if I miss a check-in", "change my emergency word" / "turn off my emergency word", "change my check-in timing". Every change is proposed back and saved only after "yes"; "cancel" backs out.
+   - After onboarding, texting `settings` shows a summary (monitoring, contact, escalation, check-in timing, home). Changes by text: "change my name", "only monitor when I start a trip", "change my trusted contact", "don't contact anyone if I miss a check-in", "change my check-in timing". Every change is proposed back and saved only after "yes"; "cancel" backs out.
    - "change my check-in timing" asks three questions (nudge seconds 30–600, escalation seconds 30–600, no-update minutes 2–15; "same" keeps a value), then confirms. Not asked during onboarding.
 
 ### Dev A — edge (`messenger/`, `locations/`, `voice/`, onboarding)
 
 | Layer | Tasks |
 | --- | --- |
-| **L1** | Spectrum terminal + cloud switch. Map text and tapbacks (`Emoji.like` / `dislike` / `emphasize` / `question`) to events. `SendText` and `AlertContact` (iMessage to contact; both numbers iMessage-capable). Location `request(chatGuid, address)` then `watch(address)` with reconnect, `sourceSequence` dedupe, skip empty coordinates. Onboarding + settings above; emergency word → `EmergencyCode` event. |
+| **L1** | Spectrum terminal + cloud switch. Map text and tapbacks (`Emoji.like` / `dislike` / `emphasize` / `question`) to events. `SendText` and `AlertContact` (iMessage to contact; both numbers iMessage-capable). Location `request(chatGuid, address)` then `watch(address)` with reconnect, `sourceSequence` dedupe, skip empty coordinates. Onboarding + settings above. |
 | **L2** | Remember outbound `messageId` per tag so a tapback targets the open check-in. Second-ping and contact-alert copy. |
 | **L3** | Pass last `shortAddress` into the ping side-channel the brain stores on the walk. No new rules. |
 | **L4** | ElevenLabs Twilio outbound `POST /v1/convai/twilio/outbound-call` with `dynamic_variables.walk_id`. Tool routes call `getLiveContext` and emit `CallEvent`. Shared secret header. Local ngrok until App Platform URL exists; then point ElevenLabs tools at DO HTTPS. |
@@ -468,7 +463,7 @@ Full SQL provided separately; paste into `src/store/schema.sql`.
 | **L1** | Apply SQL. Insert every ping. In-memory window. Rules R1, R2, R2x, R3, R4, R14. Log each fire. Simulator plays a scripted route into `handle`. |
 | **L2** | Default plan only: `expected = distanceMeters / 1.3`, `late = expected + 5`. Rules R5b, R7a/R7b, R8, R9a, R10, R16. Timer (`brain.tick`) + escalation policy + user timeouts. |
 | **L3** | Seed ~2 weeks. Query `walk_baselines` + `known_stops` once into `WalkPlan`. Rules R5a, R6 (usual cells + `confirmed_cells`), R9b (`parseReply`; ok → `place_labels`; help → call + alert; Gemini failure → unclear template), R15. |
-| **L4** | R11 → `CALLING` + `StartCall` immediately. R13 on `silent_alert` → `AlertContact`, stay `CALLING`. `getLiveContext` reads the window — no model call. |
+| **L4** | R11 → `CALLING` + `StartCall` immediately. Call outcomes per R10 (`request_escalation` → `AlertContact`, stay `CALLING`). `getLiveContext` reads the window — no model call. |
 | **L5** | `writeMessages(plan)` at walk start only; dashboard of `events` by `rule_id`; R12 if time remains. |
 
 A layer is done when its rules pass under `PROVIDER=terminal` with `SimClock`.
@@ -485,7 +480,7 @@ Each case: set clock, play points, assert phase, `events.rule_id`, and action ty
 | **R2** | Night, 0.7–2.2 m/s for 2 min, ≥120 m, >150 m from home → one prompt. Repeat inside 2 h → no second prompt |
 | **R2x** | Speed >3 m/s → no prompt |
 | **R3** | 👍 → `WALKING`. 👎 → cooldown 2 h. No reply 10 min → cooldown 1 h |
-| **R4** | Text `walk me home` at noon → `WALKING` |
+| **R4** | Text `walk me home` (or `heading home`) at noon → `WALKING` + "started" ack |
 | **R5a** | Dwell on seeded known stop under `allowedDwellMin` → silence. Past cap → R5b can fire |
 | **R5b** | 3 min still off known stop → one `checkin`. After midnight same fixture fires at 2 min |
 | **R6** | >200 m from every usual cell for 2 min → off-route `checkin`; 👍 → cell lands in `confirmed_cells` |
@@ -495,7 +490,7 @@ Each case: set clock, play points, assert phase, `events.rule_id`, and action ty
 | **R9b** | Stub `parseReply` for ok / help / unclear. Thrown stub → unclear template |
 | **R10** | Check-in, +60 s → nudge; +60 s → the policy: `AlertContact` (default), `StartCall` + `CALLING` for `CALL_USER` (also with 30 s / 30 s timeouts), one final nudge and silence for `NONE` (**floor**) |
 | **R11** | ‼️ or `call me` from `WALKING` → `StartCall` + `CALLING` before any other rule (**floor**) |
-| **R13** | Inject `CallEvent` `silent_alert` → `AlertContact`, phase stays `CALLING` (**floor**) |
+| **R11 outcomes** | Inject `CallEvent` `request_escalation` → `AlertContact`, phase stays `CALLING`; then `ended_unresolved` → `WALKING` |
 | **R14** | Two pings inside 50 m of home → arrived text to the user, no `AlertContact`, `IDLE` |
 | **R15** | Dwell >15 min on `friend` label, or stub “I’m at Sam’s” → `ENDED_ELSEWHERE`, no `AlertContact` |
 | **R16** | Two check-in conditions 1 min apart → one send. Same during `CALLING` → zero sends |
@@ -526,7 +521,7 @@ For testing the running app from a real phone without walking around.
 
 - [Locations](https://photon.codes/docs/advanced-kits/imessage/locations): `request(chatGuid, e164OrEmail)` only sends a card; `watch(address)` is a separate non-durable stream; heartbeats exist; coordinates and `accuracy` are optional; `sourceSequence` ≠ message cursor. Confirm npm package (`@photon-ai/advanced-imessage` vs Spectrum iMessage export) and same cloud line as `spectrum-ts`.
 - [Tapback reactions](https://photon.codes/docs/spectrum-ts/providers/imessage/messaging-features/tapback-reactions): inbound reaction content shape; whether outbound `message.id` is what a later tapback references. Cloud only; local iMessage cannot demo ‼️. [Terminal](https://photon.codes/docs/spectrum-ts/providers/terminal/setup-and-usage) can.
-- Spectrum send return value so `SendText` can store `messageId`. Creating a second space to text the emergency contact.
+- Spectrum send return value so `SendText` can store `messageId`. Creating a second space to text the trusted contact.
 - [Photon + ElevenLabs SIP](https://photon.codes/docs/beta/cookbooks/voice/elevenlabs): L5 only; shared iMessage lines cannot do voice.
 
 ### ElevenLabs
@@ -557,5 +552,5 @@ For testing the running app from a real phone without walking around.
 | L1 | Onboarding + location ingest + R1–R4 + R14 |
 | L2 | Check-ins + escalation (R5b, R7, R8, R9a, R10, R16) with default plan |
 | L3 | Personalization (seed, walk plan, R5a, R6, R9b, R15) |
-| L4 | Fake call + codeword (R11, R13) + App Platform always-on |
+| L4 | Fake call + call outcomes (R10, R11) + App Platform always-on |
 | L5 | Gemini-written messages, Photon SIP, rule dashboard, R12 extension |

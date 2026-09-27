@@ -29,7 +29,6 @@ export {
 function applyPatch(row: UserRecord, patch: UserPatch): void {
   Object.assign(row, patch);
   if ("trustedContact" in patch) row.contact = patch.trustedContact?.phone;
-  if ("emergencyCode" in patch) row.codeword = patch.emergencyCode?.phrase;
 }
 
 /** In-memory fallback (no DATABASE_URL / offline). */
@@ -73,12 +72,6 @@ export function createMemoryUserStore(): UserStore {
       const r = row(userId);
       r.contact = contactE164;
       r.trustedContact = { ...(r.trustedContact ?? { phone: contactE164 }), phone: contactE164 };
-    },
-
-    async setCodeword(userId: string, codeword: string): Promise<void> {
-      const r = row(userId);
-      r.codeword = codeword;
-      if (r.emergencyCode) r.emergencyCode = { ...r.emergencyCode, phrase: codeword };
     },
 
     async setHome(userId: string, lat: number, lon: number): Promise<void> {

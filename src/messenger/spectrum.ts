@@ -4,6 +4,7 @@ import { terminal } from "spectrum-ts/providers/terminal";
 import { templateForTag } from "../shared/templates.ts";
 import type { Action, ExecuteResult, SendTextTag } from "../shared/types.ts";
 import type { UserRecord, UserStore } from "../store/index.ts";
+import { placeCall, voiceConfigFromEnv } from "../voice/index.ts";
 import type { Messenger } from "./index.ts";
 import { copy } from "./copy.ts";
 
@@ -27,8 +28,6 @@ export interface SpectrumMessenger extends Messenger {
   inbound(): AsyncIterable<Inbound>;
   /** Untagged reply (onboarding copy). */
   sendToUser(userId: string, text: string): Promise<ExecuteResult>;
-  /** Best-effort typing indicator in the user's chat. */
-  typing(userId: string, on: boolean): Promise<void>;
   lastMessageId(userId: string, tag: SendTextTag): string | undefined;
   stop(): Promise<void>;
 }
@@ -44,13 +43,23 @@ function mapsLink(lat: number, lon: number): string {
   return `https://maps.apple.com/?ll=${lat.toFixed(5)},${lon.toFixed(5)}`;
 }
 
-/** Plain text of a message, looking inside in-thread replies and text+attachment groups. */
+/**
+ * Plain text of a message, looking inside in-thread replies and text+attachment
+ * groups. A shared contact card becomes "Name +number" so it parses like a typed contact.
+ */
 function textOf(content: Content): string | undefined {
   switch (content.type) {
     case "text":
       return content.text;
     case "reply":
       return textOf(content.content as Content);
+    case "contact": {
+      const phones = content.phones ?? [];
+      const phone = (phones.find((p) => p.type === "mobile") ?? phones[0])?.value;
+      const n = content.name;
+      const name = n?.formatted ?? [n?.first, n?.last].filter(Boolean).join(" ");
+      return [name, phone].filter(Boolean).join(" ") || undefined;
+    }
     case "group": {
       const parts = content.items.map((m) => textOf(m.content)).filter((t): t is string => !!t);
       return parts.length ? parts.join("\n") : undefined;
@@ -78,6 +87,7 @@ export async function createSpectrumMessenger(
   }
   const app = imApp ?? termApp!;
 
+  const voice = voiceConfigFromEnv();
   const spaces = new Map<string, Space>();
   const lastIdByTag = new Map<string, Map<SendTextTag, string>>();
   /** The user's in-thread message currently being handled; our replies go into that thread. */
@@ -118,16 +128,6 @@ export async function createSpectrumMessenger(
     return sent ? { messageId: sent.id } : {};
   }
 
-  async function typing(userId: string, on: boolean): Promise<void> {
-    const space = await spaceForUser(userId);
-    if (!space) return;
-    try {
-      await (on ? space.startTyping() : space.stopTyping());
-    } catch {
-      /* indicator is cosmetic */
-    }
-  }
-
   async function alertContact(userId: string, text: string, lat: number, lon: number) {
     const user = await users.getById(userId);
     const body = `${text}\n${mapsLink(lat, lon)}`;
@@ -145,6 +145,7 @@ export async function createSpectrumMessenger(
       }
       await space.send(body);
       console.log(`[messenger] alerted trusted contact ${contact.name ?? ""} ${contact.phone}`);
+      await sendToUser(userId, copy.contactAlerted(contact.name)).catch(() => {});
     } catch (err) {
       // e.g. Photon "Target not allowed for this project": the user must not assume someone was told.
       console.error(
@@ -168,9 +169,14 @@ export async function createSpectrumMessenger(
       case "AlertContact":
         await alertContact(action.userId, action.text, action.lat, action.lon);
         return {};
-      case "StartCall":
-        console.warn("[messenger] StartCall not wired yet (L4):", action.vars);
+      case "StartCall": {
+        const user = await users.getById(action.userId);
+        if (!user) throw new Error(`StartCall for unknown user ${action.userId}`);
+        if (!voice) throw new Error("calls not configured (ELEVENLABS_API_KEY / _AGENT_ID / _AGENT_PHONE_NUMBER_ID)");
+        const conversationId = await placeCall(voice, user.handle, action);
+        console.log(`[messenger] calling ${user.handle} (walk ${action.walkId}, conversation ${conversationId ?? "?"})`);
         return {};
+      }
     }
   }
 
@@ -215,7 +221,6 @@ export async function createSpectrumMessenger(
     execute,
     inbound,
     sendToUser,
-    typing,
     lastMessageId: (userId, tag) => lastIdByTag.get(userId)?.get(tag),
     stop: () => app.stop(),
   };

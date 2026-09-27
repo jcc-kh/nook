@@ -4,6 +4,7 @@ import type { SendTextTag } from "./types.ts";
 /** Canned copy used when Gemini is absent or fails (L1–L2 default). */
 export const templates = {
   prompt: "Heading home? 👍",
+  started: "Got it, I'm with you until you're home. I'll only check in if something looks off. Text 'call me' anytime.",
   checkin: "You ok? Tap 👍 or text me.",
   nudge: "Still there? Tap 👍 so I know you're alright.",
   arrived: "I see that you got home safe. Have a good rest!",
@@ -60,6 +61,8 @@ export function templateForTag(tag: SendTextTag): string {
   switch (tag) {
     case "prompt":
       return templates.prompt;
+    case "started":
+      return templates.started;
     case "checkin":
       return templates.checkin;
     case "nudge":

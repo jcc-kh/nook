@@ -1,11 +1,6 @@
 import { toCell } from "../shared/cell.ts";
 import type { LocationPing, RuleId } from "../shared/types.ts";
-import type {
-  CheckinTimeouts,
-  EmergencyAction,
-  MonitoringMode,
-  NoResponseAction,
-} from "../shared/settings.ts";
+import type { CheckinTimeouts, MonitoringMode, NoResponseAction } from "../shared/settings.ts";
 import { query } from "./db.ts";
 import type { UserPatch, UserRecord, UserStore } from "./types.ts";
 
@@ -15,7 +10,6 @@ type UserRow = {
   user_id: string;
   handle: string;
   contact: string | null;
-  codeword: string | null;
   home_lat: number | null;
   home_lon: number | null;
   night_start: string;
@@ -25,7 +19,6 @@ type UserRow = {
   trusted_name: string | null;
   monitoring_mode: string | null;
   escalation_on_no_response: string | null;
-  emergency_action: string | null;
   nudge_after_sec: number | null;
   escalate_after_sec: number | null;
   no_update_min: number | null;
@@ -42,7 +35,6 @@ function rowToUser(r: UserRow): UserRecord {
     userId: r.user_id,
     handle: r.handle,
     contact: r.contact ?? undefined,
-    codeword: r.codeword ?? undefined,
     homeLat: r.home_lat ?? undefined,
     homeLon: r.home_lon ?? undefined,
     nightStart: String(r.night_start).slice(0, 5),
@@ -60,21 +52,16 @@ function rowToUser(r: UserRow): UserRecord {
           onNoTextResponse: r.escalation_on_no_response as NoResponseAction,
         }
       : undefined,
-    // The demo seed sets `codeword` without an action; that isn't an emergency word.
-    emergencyCode:
-      r.codeword && r.emergency_action
-        ? { phrase: r.codeword, action: r.emergency_action as EmergencyAction }
-        : undefined,
     timeouts: Object.keys(timeouts).length ? timeouts : undefined,
   };
 }
 
 const USER_SELECT = `
-  SELECT user_id, handle, contact, codeword,
+  SELECT user_id, handle, contact,
     ST_Y(home::geometry) AS home_lat,
     ST_X(home::geometry) AS home_lon,
     night_start::text, night_end::text, tz, display_name,
-    trusted_name, monitoring_mode, escalation_on_no_response, emergency_action,
+    trusted_name, monitoring_mode, escalation_on_no_response,
     nudge_after_sec, escalate_after_sec, no_update_min, onboarded_at
   FROM users
 `;
@@ -92,19 +79,14 @@ function patchColumns(patch: UserPatch): Record<string, unknown> {
   if (has("escalation")) {
     cols.escalation_on_no_response = patch.escalation?.onNoTextResponse ?? null;
   }
-  if (has("emergencyCode")) {
-    cols.codeword = patch.emergencyCode?.phrase ?? null;
-    cols.emergency_action = patch.emergencyCode?.action ?? null;
-  }
   if (has("timeouts")) {
     cols.nudge_after_sec = patch.timeouts?.nudgeAfterSec ?? null;
     cols.escalate_after_sec = patch.timeouts?.escalateAfterSec ?? null;
     cols.no_update_min = patch.timeouts?.noUpdateMin ?? null;
   }
   if (has("onboardedAt")) cols.onboarded_at = patch.onboardedAt?.toISOString() ?? null;
-  // Raw columns, when given explicitly, win over the structured fields above.
+  // Raw column, when given explicitly, wins over trustedContact above.
   if (has("contact")) cols.contact = patch.contact ?? null;
-  if (has("codeword")) cols.codeword = patch.codeword ?? null;
   return cols;
 }
 
@@ -147,14 +129,6 @@ export function createTigerUserStore(): UserStore {
       if (res.rowCount === 0) throw new Error(`unknown user ${userId}`);
     },
 
-    async setCodeword(userId: string, codeword: string): Promise<void> {
-      const res = await query(`UPDATE users SET codeword = $2 WHERE user_id = $1`, [
-        userId,
-        codeword,
-      ]);
-      if (res.rowCount === 0) throw new Error(`unknown user ${userId}`);
-    },
-
     async setHome(userId: string, lat: number, lon: number): Promise<void> {
       const res = await query(
         `UPDATE users SET home = ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography
@@ -185,7 +159,6 @@ export async function upsertDemoUser(user: {
   userId: string;
   handle: string;
   contact: string;
-  codeword: string;
   homeLat: number;
   homeLon: number;
   nightStart?: string;
@@ -194,16 +167,15 @@ export async function upsertDemoUser(user: {
   displayName?: string;
 }): Promise<void> {
   await query(
-    `INSERT INTO users (user_id, handle, contact, codeword, home, night_start, night_end, tz, display_name)
+    `INSERT INTO users (user_id, handle, contact, home, night_start, night_end, tz, display_name)
      VALUES (
-       $1, $2, $3, $4,
-       ST_SetSRID(ST_MakePoint($6, $5), 4326)::geography,
-       $7::time, $8::time, $9, $10
+       $1, $2, $3,
+       ST_SetSRID(ST_MakePoint($5, $4), 4326)::geography,
+       $6::time, $7::time, $8, $9
      )
      ON CONFLICT (user_id) DO UPDATE SET
        handle = EXCLUDED.handle,
        contact = EXCLUDED.contact,
-       codeword = EXCLUDED.codeword,
        home = EXCLUDED.home,
        night_start = EXCLUDED.night_start,
        night_end = EXCLUDED.night_end,
@@ -213,7 +185,6 @@ export async function upsertDemoUser(user: {
       user.userId,
       user.handle,
       user.contact,
-      user.codeword,
       user.homeLat,
       user.homeLon,
       user.nightStart ?? "22:00",
