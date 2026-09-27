@@ -163,7 +163,10 @@ export function createVonageCalls(opts: {
     const event = (await req.json().catch(() => ({}))) as { status?: string; detail?: string };
     if (!session || !event.status) return Response.json({ ok: true });
     console.log(`[vonage] ${session.userId} call ${event.status}${event.detail ? ` (${event.detail})` : ""}`);
-    if (event.status === "answered") session.answered = true;
+    if (event.status === "answered") {
+      if (!session.answered && !session.settled) void report(session.userId, session.walkId, "started");
+      session.answered = true;
+    }
     else if (NOT_PLACED.has(event.status) && !session.answered && !session.settled) {
       session.settled = true;
       await onFailed(session.action, session.contactName).catch((err) =>

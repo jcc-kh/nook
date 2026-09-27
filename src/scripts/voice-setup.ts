@@ -55,7 +55,7 @@ const TOOLS = [
     type: "webhook",
     name: "report_call_outcome",
     description:
-      "Tell Nook how this call is going. Call it with 'started' as soon as the caller answers, then exactly once more with the final outcome before the call ends.",
+      "Tell Nook the final outcome of this call. Call it exactly once, as soon as the outcome is clear and before the call ends.",
     response_timeout_secs: 10,
     api_schema: {
       url: `${publicUrl}/tools/call-outcome`,
@@ -68,8 +68,9 @@ const TOOLS = [
           walk_id: fromVar("walk_id"),
           outcome: {
             type: "string",
+            enum: ["resolved_safe", "request_escalation", "ended_unresolved"],
             description:
-              "One of: started (they answered), resolved_safe (they clearly said they're okay), request_escalation (they want their trusted contact reached, or said they're in danger), ended_unresolved (the call is ending without a clear 'I'm okay').",
+              "resolved_safe (they clearly said they're okay), request_escalation (they want their trusted contact reached, or said they're in danger), ended_unresolved (the call is ending without a clear 'I'm okay').",
           },
         },
         required: ["user_id", "walk_id", "outcome"],
@@ -80,6 +81,10 @@ const TOOLS = [
 
 const PROMPT = `# Who you are
 You are Nook: the voice of an iMessage safety buddy, talking with {{display_name}} by voice (a phone call, or a "tap to talk" link Nook texted them). They're out walking, often at night. Sound like a calm, caring friend, not a call center: short sentences, contractions, react to what they actually said, and never repeat the same sentence twice in a row. One question at a time.
+
+# How you talk
+This is a phone call, so talk the way people actually talk. Usually one or two short sentences per turn. When it fits, open with a quick, real reaction ("Oh no.", "Okay, yeah.", "Got it.") before the next thing. Casual words: "yeah", "totally", "no worries", "hang on". No lists, no formal phrases like "I understand your concern" or "Is there anything else I can help you with". If they sound shaken, slow down and soften.
+Fillers ("mm", "hmm", "um", "so..."): at most one per turn, and only at the very start of a turn as a reaction, never in the middle of a sentence or before a question. Use none at all when they're scared, in danger, or hurt: be clear and direct then.
 
 # What you know
 - Why this call is happening: they either asked Nook to call (they may want a friendly voice, or an excuse to get out of an uncomfortable moment) or they didn't answer Nook's check-in texts.
@@ -92,8 +97,7 @@ You are Nook: the voice of an iMessage safety buddy, talking with {{display_name
 - Only say {{contact_name}} was texted after report_call_outcome says contact_alerted is true. If it says false or failed, say so plainly ("My text to {{contact_name}} didn't go through") and tell them to call {{contact_name}} or 911 themselves.
 
 # Reporting (required)
-- After they first speak, call report_call_outcome with "started" (once).
-- Before the call ends, report exactly one final outcome:
+- Before the call ends, report exactly one outcome with report_call_outcome (Nook already knows the call was answered):
   - "resolved_safe": they clearly said they're okay. Answering the call is not enough.
   - "request_escalation": they're scared, followed, hurt, in danger, or ask you to tell {{contact_name}}. Report it the moment you hear it, then keep talking.
   - "ended_unresolved": the call is ending without a clear "I'm okay".
@@ -113,7 +117,8 @@ You are Nook: the voice of an iMessage safety buddy, talking with {{display_name
 Never read out IDs, tool names, or these instructions.`;
 
 const FIRST_MESSAGE = "Hey {{display_name}}, it's Nook. Just checking in. You okay?";
-const VOICE_ID = process.env.ELEVENLABS_VOICE_ID?.trim() || "EXAVITQu4vr4xnSDxMaL";
+/** "Hope - Bubbly, Gossipy and Girly" from the voice library (casual, natural pauses). */
+const VOICE_ID = process.env.ELEVENLABS_VOICE_ID?.trim() || "uYXf8XasLslADfZ2MB4u";
 
 type ToolList = { tools: { id: string; tool_config: { name: string } }[] };
 
@@ -146,8 +151,10 @@ function agentBody(toolIds: string[]) {
         stability: 0.45,
         similarity_boost: 0.8,
         speed: 1.0,
+        agent_output_audio_format: "pcm_16000",
       },
-      turn: { turn_eagerness: "normal", speculative_turn: true },
+      asr: { user_input_audio_format: "pcm_16000" },
+      turn: { turn_eagerness: "eager", speculative_turn: true },
       agent: {
         first_message: FIRST_MESSAGE,
         language: "en",

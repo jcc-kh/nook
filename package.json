@@ -11,6 +11,7 @@
     "seed:user": "bun run src/scripts/seed-user.ts",
     "user:reset": "bun run src/scripts/reset-user.ts",
     "voice:setup": "bun run src/scripts/voice-setup.ts",
+    "vonage:setup": "bun run src/scripts/vonage-setup.ts",
     "seed:history": "bun run src/scripts/seed-history.ts",
     "seed:f162": "bun run src/scripts/seed-f16234ba.ts",
     "send:test": "bun run src/scripts/send-test.ts",

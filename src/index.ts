@@ -84,6 +84,10 @@ async function runActions(actions: Action[]): Promise<void> {
         console.log(`[nook] → StartCall ${action.userId} walk=${action.walkId}`);
       }
       await messenger.execute(action);
+      // Twilio calls give us no answer signal and the agent no longer reports "started".
+      if (action.type === "StartCall" && callMode(voice) === "phone") {
+        await reportCall(action.userId, action.walkId, "started");
+      }
     } catch (err) {
       console.error(`[nook] ${action.type} failed`, err);
       if (action.type === "StartCall") {
@@ -173,6 +177,25 @@ async function handleDevSim(req: Request, url: URL): Promise<Response> {
     body.walk === undefined ? {} : { startWalk: body.walk },
   );
   return Response.json({ ok: true, userId: user.userId, ...started });
+}
+
+/** POST /dev/call {handle}: place a check-in call (or link) outside any walk, to test the voice path. */
+async function handleDevCall(req: Request): Promise<Response> {
+  if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+  const body = (await req.json().catch(() => ({}))) as { handle?: string };
+  const handle = body.handle ? toE164(body.handle) ?? body.handle : undefined;
+  const user = handle ? await users.getByHandle(handle) : null;
+  if (!user) return Response.json({ ok: false, error: `no user for ${body.handle ?? "(missing handle)"}` }, { status: 404 });
+  const walkId = `test-call-${Date.now()}`;
+  await runActions([
+    {
+      type: "StartCall",
+      userId: user.userId,
+      walkId,
+      vars: { displayName: user.displayName ?? "friend", street: "your street", minutesWalking: 0, walkId },
+    },
+  ]);
+  return Response.json({ ok: true, userId: user.userId, walkId, mode: callMode(voice) });
 }
 
 /**
@@ -276,11 +299,12 @@ const server = Bun.serve<BridgeSocket["data"], never>({
       return srv.upgrade(req, { data }) ? undefined : new Response("upgrade failed", { status: 400 });
     }
     if (vonageCalls && url.pathname.startsWith("/vonage/event/")) return vonageCalls.handleEvent(req, url);
-    if (devSim && url.pathname.startsWith("/dev/sim")) {
+    if (devSim && url.pathname.startsWith("/dev/")) {
       if (!isLoopback(srv.requestIP(req)?.address)) {
         return new Response("forbidden", { status: 403 });
       }
-      return handleDevSim(req, url);
+      if (url.pathname === "/dev/call") return handleDevCall(req);
+      if (url.pathname.startsWith("/dev/sim")) return handleDevSim(req, url);
     }
     if (url.pathname.startsWith("/tools/")) return handleTool(req, url);
     if (talkLinks && url.pathname.startsWith("/talk/")) return talkLinks.handle(req, url);
