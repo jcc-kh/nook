@@ -3,7 +3,7 @@ import { createGeminiClient } from "./gemini.ts";
 import { classifyFallback, writeMessagesFallback } from "./fallback.ts";
 
 export { classifyFallback, writeMessagesFallback } from "./fallback.ts";
-export { reactionIntent } from "./classify.ts";
+export { classifyLocal, reactionIntent } from "./classify.ts";
 
 /**
  * LLM craft/classify. Never imported from the location-ping rule path except via
@@ -33,8 +33,8 @@ export function createLlm(opts?: { useGemini?: boolean }): Llm {
       return { writeMessages: writeMessagesFallback, classify: classifyFallback, useGemini: false };
     }
     console.log("[llm] Gemini enabled");
-    const client = createGeminiClient(key);
-    return { ...client, useGemini: true };
+    const { writeMessages, classify } = createGeminiClient(key);
+    return { writeMessages, classify, useGemini: true };
   }
   console.log("[llm] templates + regex fallback (Gemini off)");
   return { writeMessages: writeMessagesFallback, classify: classifyFallback, useGemini: false };

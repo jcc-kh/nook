@@ -52,7 +52,6 @@ function rowToUser(r: UserRow): UserRecord {
   };
 }
 
-/** Live Tiger `users` has no codeword column; phrase lives in the settings overlay. */
 const USER_SELECT = `
   SELECT user_id, handle, contact,
     ST_Y(home::geometry) AS home_lat,
@@ -108,16 +107,13 @@ export function createTigerUserStore(): UserStore {
     },
 
     async updateUser(userId: string, patch: UserPatch): Promise<void> {
-      const contact = patch.trustedContact?.phone ?? patch.contact;
-      const displayName = patch.displayName;
-      if (contact === undefined && displayName === undefined) return;
-      const res = await query(
-        `UPDATE users SET
-           contact = COALESCE($2, contact),
-           display_name = COALESCE($3, display_name)
-         WHERE user_id = $1`,
-        [userId, contact ?? null, displayName ?? null],
-      );
+      const cols = Object.entries(patchColumns(patch));
+      if (cols.length === 0) return;
+      const sets = cols.map(([col], i) => `${col} = $${i + 2}`).join(", ");
+      const res = await query(`UPDATE users SET ${sets} WHERE user_id = $1`, [
+        userId,
+        ...cols.map(([, v]) => v),
+      ]);
       if (res.rowCount === 0) throw new Error(`unknown user ${userId}`);
     },
 

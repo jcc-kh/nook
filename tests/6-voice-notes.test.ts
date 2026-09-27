@@ -64,7 +64,7 @@ describe("forwarding", () => {
     const h = harness();
     await h.startWalk();
     const out = await h.voiceNote("", { transcribed: false });
-    expect(allText(out)).toContain("couldn't make it out");
+    expect(allText(out)).toContain("couldn't transcribe it clearly");
     expect(alerts(out)).toHaveLength(0);
   });
 

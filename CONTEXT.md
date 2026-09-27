@@ -27,8 +27,9 @@ Docs index: [https://photon.codes/docs/llms.txt](https://photon.codes/docs/llms.
 
 1. No LLM call on the location-ping path. Rules are deterministic code.
 2. Personalization = numbers from Tiger (typical walk time, known stops, usual route) loaded once per walk into a `WalkPlan`.
-3. Safety floors always act and ignore personalization: an unanswered check-in (R10), no location updates (R8), immediate danger (R9b / ‼️). The user's setting decides *which* action R10 takes (contact or a final nudge), never *whether* it acts. Immediate danger always alerts the trusted contact, whatever the setting.
-3a. Calls never escalate. Silence, a missed call, or a call that ends unresolved never places a call and never alerts anyone by itself; it becomes a text check-in.
+3. Safety floors always act and ignore personalization: an unanswered check-in (R10), no location updates (R8), immediate danger (R9b / ‼️). The user's setting decides *which* action R10 takes (text the contact, or keep checking in at a slower cadence), never *whether* it acts. Immediate danger always alerts the trusted contact, whatever the setting.
+3a. Calls never escalate. Silence, a missed call, or a call that ends unresolved never places a call and never alerts anyone by itself; it becomes a text check-in. Once immediate danger is established Nook never starts a call (911 takes precedence); a call already in progress can continue.
+3b. Copy tone: calm, attentive, useful, normal capitalization. Not emotionally needy, not overly comforting, never narrating Nook's own companionship. Ambiguous danger gets only "Are you in immediate danger right now? Reply yes or no."
 4. Every fired rule is logged to `events` with a `rule_id`.
 5. Injectable clock + GPS simulator: the demo never depends on real GPS/time.
 6. Gemini failures fall back to message templates.
@@ -83,7 +84,10 @@ flowchart LR
 
 ### Invariants
 
-- `LocationPing` handling is pure rules. Gemini runs only in `llm/writeMessages` (once, when a walk starts, L5) and `llm/classify` (free text and voice-note transcripts → `SafetyIntent`). Template strings and the regex classifier are the fallback. Gemini can never raise clear danger on its own or erase a regex danger signal (`guardIntent`).
+- `LocationPing` handling is pure rules. Gemini runs only in `llm/writeMessages` (once, when a walk starts, L5) and `llm/classify` (free text and voice-note transcripts → `SafetyIntent`).
+- Classification is layered (`src/llm/classify.ts`): (1) `classifyDeterministic`: tapbacks, short replies read against `awaiting` (danger confirmation / route choice / place choice / check-in), a narrow clear-danger list, stop, call, route choice, safe / place, with negation handling; (2) Gemini for anything left, JSON only, constrained by `intentJsonSchema` and validated with zod (`intentSchema`), one repair retry on malformed output; (3) `classifyConservative` (ambiguous danger / uneasy / unclear, never safe or clear danger) when Gemini is off, fails, or returns invalid output twice, and as the guard around Gemini (`guardIntent`: Gemini never produces clear danger, only the confirmation question; messages the conservative layer reads as possible danger skip Gemini entirely; and Gemini can't turn unease into safe). Precedence: clear danger > stop > call > route choice > safe > uneasy > unclear. The classifier returns `{ intent, classifier }`; the quote is always the user's own words, filled in by the server.
+- All state changes happen in the engine's `applyIntent`; the classifier never writes state. Inputs are de-duplicated by message id (reactions by id, or emoji + target within 2 min; call callbacks by walk + outcome + text within 60 s) so a redelivery can't alert twice, forward a voice note twice, start a second call, or repeat a place lookup. Each applied intent logs message id, source, classifier, intent, safety before → after and side effects; the user's words are stored once, in that `R9b` statement event.
+- Input modality affects convenience, not safety semantics: 👎, "this area feels weird" and a voice note saying it take the same path.
 - Personalization is a `WalkPlan` loaded once when entering `WALKING`. Safety floors ignore it.
 - Every fired rule inserts `events` with a `rule_id`. Pings are stored even when R1 suppresses prompts.
 - `Clock.now()` is the only time source. The simulator never needs a real GPS fix or the real clock.
@@ -132,7 +136,7 @@ stateDiagram-v2
   ENDED_ELSEWHERE --> IDLE
 ```
 
-With policy `NONE`, an unanswered check-in gets one final nudge and stays in `CHECKING_IN` (a late 👍 still resumes).
+An unanswered check-in gets exactly one follow-up. With policy `NONE`, Nook then goes quiet and checks in again 10 minutes later with a plain "Checking in again. Everything okay?" (never a more urgent-sounding "final nudge").
 
 Phase lives in memory and on `walks.status` so a process restart can resume an open walk. The last-5-minute ping window stays in memory only; Tiger is the durable log. On boot (first tick) the engine lists open walks in Tiger, resumes them, and rebuilds the window and last ping from recent Tiger pings. A walk resumed in `CHECKING_IN` restarts its reply timers from the resume time.
 
@@ -349,16 +353,22 @@ export interface WalkPlan {
 // --- LLM (not on ping path) ---
 
 export type SafetyIntent =
-  | { kind: "safe"; placeLabel?: string }
+  | { kind: "safe" }
   | { kind: "uneasy"; detail?: string; wants?: RouteChoice; lost?: boolean }
-  | { kind: "call"; reason?: CallReason }
-  | { kind: "danger"; clear: boolean; quote?: string; wantsCall?: boolean }
+  | { kind: "call"; reason?: CallReason; uneasy?: boolean }
+  | { kind: "danger"; clear: boolean; quote: string; wantsCall?: boolean } // wantsCall only shortens the guidance; Nook never calls in danger
   | { kind: "route_choice"; choice: RouteChoice }
+  | { kind: "place"; label: string }
+  | { kind: "stop" }
   | { kind: "unclear" };
 
+export type Awaiting = "danger_confirmation" | "route_choice" | "place_choice" | "checkin" | null;
+export interface ClassifyContext { safetyState: SafetyState; awaiting: Awaiting; destination?: string; recent: { from: "user" | "nook"; text: string }[] }
+export interface Classification { intent: SafetyIntent; classifier: "reaction" | "context" | "deterministic" | "gemini" | "fallback" }
+
 export type WriteMessages = (plan: WalkPlan) => Promise<Record<string, string>>;
-/** Typed text or a voice-note transcript → SafetyIntent. */
-export type ClassifyInput = (text: string) => Promise<SafetyIntent>;
+/** Typed text or a voice-note transcript → SafetyIntent. Classifies only; the engine owns state. */
+export type ClassifyInput = (text: string, ctx: ClassifyContext) => Promise<Classification>;
 ```
 
 ### User settings (`src/shared/settings.ts`)
@@ -433,7 +443,7 @@ Full SQL provided separately; paste into `src/store/schema.sql`.
 | R8 | No location update for `noUpdateMin` (default 3) while walking, or passive: check-in. Timer-driven; once per silence. No reply: R10 escalation (**floor**) |
 | R9a | 👍 to check-in (or after an alert): resume; no check-in for 10 min |
 | R9b | Text / voice note / tapback → `SafetyIntent` (see Safety model): safe (save place label; confirms off-route) \| uneasy \| call \| danger (clear → 911 + emergency alert; ambiguous → confirm) \| route choice \| unclear (options spelled out, timers keep running) |
-| R10 | No reply `nudgeAfterSec` (60): nudge; +`escalateAfterSec` (60): the user's `onNoTextResponse`. `CONTACT_TRUSTED` → alert contact with name, number and location; `NONE` → one final nudge, then stop (**floor**). Never a call. The nudge tells the user their next step and its timing |
+| R10 | No reply `nudgeAfterSec` (60): nudge; +`escalateAfterSec` (60): the user's `onNoTextResponse`. `CONTACT_TRUSTED` → alert contact with name, number and location; `NONE` → no message, then a plain re-check 10 min later (**floor**). Never a call. The nudge tells the user their next step and its timing |
 | R11 | ❓ or "call me": opt-in voice companion call (text reply instead when calls aren't configured). Call outcomes: `resolved_safe` → walking; `request_escalation` → immediate danger; `ended_unresolved` → text check-in only |
 | R12 | Uneasy → "busier" → up to 3 open places from the nav provider |
 | R17 | Destination shared (Apple Maps link / coordinates / "heading to X"), or busier stop picked; arrival acknowledged |
@@ -524,8 +534,8 @@ Each case: set clock, play points, assert phase, `events.rule_id`, and action ty
 | **R7a / R7b** | Advance past `late`, then `late + 10` |
 | **R8** | Last ping, then `tick` at +2 min → nothing; `tick` at +3 min → check-in with no new ping; later ticks don't repeat it (**floor**) |
 | **R9a** | 👍 on check-in → `WALKING`, same tag suppressed 10 min |
-| **R9b** | `classifyFallback` for safe / uneasy / call / danger / unclear (see `tests/2-danger.test.ts`) |
-| **R10** | Check-in, +60 s → nudge; +60 s → the policy: `AlertContact` (default, also with 30 s / 30 s timeouts), one final nudge and silence for `NONE` (**floor**). Never `StartCall` |
+| **R9b** | Deterministic classifier, context replies, precedence and negation (`tests/8-intents.test.ts`); eval fixture `tests/fixtures/safety-intents.json` (`tests/9-intent-eval.test.ts`, and `bun run eval:intents` against Gemini) |
+| **R10** | Check-in, +60 s → nudge; +60 s → the policy: `AlertContact` (default, also with 30 s / 30 s timeouts), for `NONE`, no second nudge and a plain re-check 10 min later (**floor**). Never `StartCall` |
 | **R11** | ‼️ or `call me` from `WALKING` → `StartCall` + `CALLING` before any other rule (**floor**) |
 | **R11 outcomes** | Inject `CallEvent` `request_escalation` → `AlertContact`, phase stays `CALLING`; then `ended_unresolved` → `WALKING` |
 | **R14** | Two pings inside 50 m of home → arrived text to the user, no `AlertContact`, `IDLE` |
@@ -574,7 +584,7 @@ For testing the running app from a real phone without walking around.
 
 ### Gemini
 
-- Model id and JSON response schema for `parseReply`. Timeout budget short enough that a hang becomes the template path.
+- Model id (`GEMINI_MODEL`, default `gemini-3.5-flash-lite`), `responseJsonSchema` from `intentSchema`, 4 s timeout so a hang becomes the conservative fallback. The free tier rate-limits (HTTP 429) quickly; a 429 falls back like any other failure.
 
 ### DigitalOcean App Platform
 

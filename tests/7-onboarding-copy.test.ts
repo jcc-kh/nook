@@ -6,36 +6,43 @@ import { describe, expect, test } from "bun:test";
 import { copy, escalationOptions } from "../src/messenger/copy.ts";
 import { escalationKeyword, parseIntent } from "../src/messenger/parse.ts";
 import { normalizeNoResponseAction } from "../src/shared/settings.ts";
-import { LEGEND } from "../src/shared/templates.ts";
+import { LEGEND, LEGEND_OPTIONS } from "../src/shared/templates.ts";
 import { allText, harness, makeUser, START } from "./helpers.ts";
 
 describe("onboarding copy", () => {
-  test("welcome explains every tapback in words", () => {
-    for (const s of ["👍 safe", "👎 uneasy", "❓ call me", "‼️ immediate danger", "911"]) {
+  test("welcome explains every tapback in words and asks for a name", () => {
+    for (const s of ["👍 I'm good", "👎 Something feels off", "❓ Call me", "‼️ I need help now"]) {
       expect(copy.welcome).toContain(s);
     }
+    expect(copy.welcome).toContain("First, what should I call you?");
   });
 
   test("escalation menu has no call option", () => {
     expect(escalationOptions).toEqual(["CONTACT_TRUSTED", "NONE"]);
     const menu = copy.askEscalation({ phone: "+15555550100", name: "Sam" });
-    expect(menu).toContain("1. text Sam my location");
-    expect(menu).toContain("2. just keep checking in");
+    expect(menu).toContain("1. Text Sam your location");
+    expect(menu).toContain("2. Keep checking in");
     expect(menu).not.toMatch(/\b3\./);
     expect(menu.toLowerCase()).not.toContain("call me");
-    expect(menu).toContain("‼️");
+    expect(menu).toContain("I'll alert Sam either way");
   });
 
-  test("done() recap includes the legend and the 911 line", () => {
+  test("done() recap includes the tapbacks and the urgent-help line", () => {
     const done = copy.done(makeUser());
-    expect(done).toContain(LEGEND);
-    expect(done).toContain("911");
+    expect(done).toContain(LEGEND_OPTIONS);
+    expect(done).toContain("If you need urgent help, use ‼️");
+    expect(done).toContain("send Sam your location");
   });
 
-  test("trip start asks for an Apple Maps destination and mentions calls", () => {
+  test("trip start carries the legend and asks for an Apple Maps destination", () => {
     expect(copy.started).toContain(LEGEND);
-    expect(copy.started).toContain("apple maps");
-    expect(copy.started).toContain("call");
+    expect(copy.started).toContain("Apple Maps place or address");
+  });
+
+  test("Nook copy uses normal capitalization", () => {
+    for (const text of [copy.welcome, copy.started, copy.nightOut, copy.dangerConfirm, copy.callStarting, copy.dangerResolved]) {
+      expect(text.charAt(0)).toBe(text.charAt(0).toUpperCase());
+    }
   });
 });
 
@@ -80,9 +87,9 @@ describe("check-in copy", () => {
     const h = harness();
     await h.startWalk();
     const out = allText(await h.text("asdfgh"));
-    expect(out).toMatch(/okay|safe/);
-    expect(out).toContain("uneasy");
-    expect(out).toContain("call");
-    expect(out).toContain("immediate danger");
+    expect(out).toContain("Are you okay");
+    expect(out).toContain("does something feel off");
+    expect(out).toContain("would you like me to call");
+    expect(out).toContain("do you need urgent help");
   });
 });

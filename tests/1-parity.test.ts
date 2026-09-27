@@ -22,7 +22,7 @@ describe("input parity", () => {
       expect(h.rt().safety).toBe("uneasy");
       expect(alerts(out)).toHaveLength(0);
       expect(calls(out)).toHaveLength(0);
-      expect(allText(out)).toContain("somewhere busier");
+      expect(allText(out)).toContain("Do you want to keep heading home");
     });
 
     test(`${ch}: call request → StartCall, no alert`, async () => {

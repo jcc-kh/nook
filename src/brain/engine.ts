@@ -1,8 +1,11 @@
 import type {
   Action,
+  Awaiting,
   CallReason,
   CallVars,
   Channel,
+  ClassifierUsed,
+  ClassifyContext,
   ClassifyInput,
   Clock,
   Destination,
@@ -57,11 +60,10 @@ import {
   upsertPlaceLabel,
   type WalkSafetyPatch,
 } from "../store/walks.ts";
-import { copy } from "../messenger/copy.ts";
-import { guideToSafePlace, SAFE_PLACE } from "../voice/safePlace.ts";
-import { parseCoordinates, parseMapsLink, parseYesNo } from "../messenger/parse.ts";
+import { busierPlace, copy } from "../messenger/copy.ts";
+import { parseCoordinates, parseMapsLink } from "../messenger/parse.ts";
 import { query } from "../store/db.ts";
-import { classifyFallback as classifyText, reactionIntent } from "../llm/classify.ts";
+import { classifyLocal, reactionIntent } from "../llm/classify.ts";
 import type { NavService, SafePlaceOption } from "../nav/index.ts";
 
 const WINDOW_MS = 5 * 60_000;
@@ -103,6 +105,16 @@ const DEST_TEXT_RE =
 /** Voice notes forwarded to the contact per danger window. */
 const MAX_FORWARDED_NOTES = 5;
 const RECENT_STATEMENTS = 5;
+/** Turns (user + Nook) handed to the classifier. */
+const RECENT_TURNS = 4;
+/** "Keep checking in": after an unanswered check-in and follow-up, check again this much later. */
+const RECHECK_MS = 10 * 60_000;
+/** How long a processed message / callback id is remembered for de-duplication. */
+const PROCESSED_TTL_MS = 30 * 60_000;
+/** Reactions without their own id: the same emoji on the same message within this window is a repeat. */
+const REACTION_DEDUP_MS = 2 * 60_000;
+/** Call callbacks with the same walk, outcome and text within this window are a repeat. */
+const CALL_EVENT_DEDUP_MS = 60_000;
 
 export interface BrainDeps {
   clock: Clock;
@@ -210,6 +222,14 @@ interface UserRuntime {
   callAnswered: boolean;
   /** Last few things the user said. Memory only; also written to the events table. */
   recentStatements: Statement[];
+  /** Last few turns either way, for classifying short replies. Memory only. */
+  recentTurns: { from: "user" | "nook"; text: string }[];
+  /** Message / callback keys already applied → when. Duplicate deliveries are dropped. */
+  processed: Map<string, number>;
+  /** "Keep checking in" setting: when to check again after an unanswered check-in. */
+  recheckAt: Date | null;
+  /** Rotates the "somewhere busier" wording. */
+  busierTurn: number;
   pendingActions: Action[];
 }
 
@@ -263,6 +283,10 @@ function emptyRuntime(): UserRuntime {
     callReason: null,
     callAnswered: false,
     recentStatements: [],
+    recentTurns: [],
+    processed: new Map(),
+    recheckAt: null,
+    busierTurn: 0,
     pendingActions: [],
   };
 }
@@ -283,6 +307,7 @@ function resetTripSafety(rt: UserRuntime) {
   rt.callReason = null;
   rt.callAnswered = false;
   rt.destNearCount = 0;
+  rt.recheckAt = null;
 }
 
 function brainLog(deps: BrainDeps, ...parts: unknown[]) {
@@ -296,21 +321,6 @@ function isGreeting(text: string): boolean {
 function isAffirmativeText(text: string): boolean {
   return /^(ok|okay|fine|good|i'?m (good|fine|ok|okay)|all good|yes)([!.?\s]*)$/i.test(
     text.trim(),
-  );
-}
-
-/** User wants Nook to stop watching / stop check-ins for this trip. */
-function isDismissText(text: string): boolean {
-  const t = text.trim().toLowerCase();
-  if (
-    /^(stop|dismiss|enough|cancel|never ?mind|leave me alone|go away|not tonight)([!.?\s]*)$/i.test(
-      t,
-    )
-  ) {
-    return true;
-  }
-  return /\b(stop (checking|watching|texting|asking|bugging|hovering|tracking)|don'?t (need|want) (you|nook)|you can (stop|go|stand down)|end (the )?(walk|trip)|wrap(ping)? up|i'?m (good|fine|ok|okay|safe).{0,20}\bstop\b)\b/i.test(
-    t,
   );
 }
 
@@ -485,11 +495,15 @@ async function persistSafety(deps: BrainDeps, rt: UserRuntime, patch: WalkSafety
   }
 }
 
-function copyFor(rt: UserRuntime, tag: SendTextTag | "unclear"): string {
-  const fromBank = rt.copy?.[tag];
-  if (fromBank) return fromBank;
-  if (tag === "unclear") return templates.unclear;
-  return templateForTag(tag);
+/** Gemini-written copy for the plain lines; the follow-up nudge and "didn't get that" are fixed. */
+function copyFor(rt: UserRuntime, tag: SendTextTag): string {
+  if (tag === "nudge") return templates.nudge;
+  return rt.copy?.[tag] || templateForTag(tag);
+}
+
+function pushTurn(rt: UserRuntime, from: "user" | "nook", text: string) {
+  rt.recentTurns.push({ from, text: text.slice(0, 200) });
+  if (rt.recentTurns.length > RECENT_TURNS) rt.recentTurns.shift();
 }
 
 function send(
@@ -505,7 +519,28 @@ function send(
     tag,
   };
   rt.pendingActions.push(action);
+  pushTurn(rt, "nook", action.text);
   return action;
+}
+
+/** True if `key` was already applied; otherwise remembers it. `windowMs` limits how long it counts as a repeat. */
+function seenBefore(rt: UserRuntime, key: string, now: Date, windowMs = PROCESSED_TTL_MS): boolean {
+  const at = rt.processed.get(key);
+  if (at != null && now.getTime() - at < windowMs) return true;
+  rt.processed.set(key, now.getTime());
+  if (rt.processed.size > 200) {
+    for (const [k, t] of rt.processed) if (now.getTime() - t > PROCESSED_TTL_MS) rt.processed.delete(k);
+  }
+  return false;
+}
+
+/** The question Nook is waiting on; decides what a bare "yes" / "no" means. */
+function awaitingOf(rt: UserRuntime): Awaiting {
+  if (rt.dangerConfirm) return "danger_confirmation";
+  if (rt.offeredPlaces) return "place_choice";
+  if (rt.awaitingRouteChoice) return "route_choice";
+  if (rt.phase === "CHECKING_IN") return "checkin";
+  return null;
 }
 
 /** Non-emergency alert (a check-in went unanswered). One per walk. */
@@ -582,36 +617,41 @@ function tripDestinationName(rt: UserRuntime): string {
 }
 
 function placeLine(p: SafePlaceOption): string {
-  const open = p.openNow === true ? (p.hours ? `open, ${p.hours}` : "open") : "hours unknown";
-  return `${p.rank}. ${p.name} (${p.category}, ${open}, ~${p.walkMin} min walk)`;
+  const hours = p.openNow === true ? (p.hours ? `, ${p.hours}` : "") : ", hours unknown";
+  return `${p.rank}. ${p.name} (${p.category}, about ${p.walkMin} min walk${hours})`;
 }
 
+/**
+ * First thing the voice agent says. Nook never starts a call once immediate
+ * danger is established, so the danger line only matters for a call that was
+ * already being set up.
+ */
 function openingLine(
   name: string | undefined,
   reason: CallReason,
   rt: UserRuntime,
+  contactName?: string,
 ): string {
-  const hey = name ? `Hey ${name}, I'm here.` : "Hey, I'm here.";
+  const hey = name ? `Hey ${name}` : "Hey";
   const dest = tripDestinationName(rt);
   const toDest = dest === "home" ? "home" : `to ${dest}`;
-  if (rt.safety === "immediate_danger") return `${hey} Are you somewhere safe right now?`;
-  if (rt.interim?.name === SAFE_PLACE.name) {
-    const last = rt.lastPing;
-    const guide = last ? guideToSafePlace(last.lat, last.lon) : null;
-    return guide ? `${hey} ${guide.say.join(" ")}` : `${hey} There's a Morton Williams open all night. I'll walk you there.`;
+  const towardDest = dest === "home" ? "home" : `toward ${dest}`;
+  if (rt.safety === "immediate_danger") {
+    const who = contactName ?? "your trusted contact";
+    return `${name ? `${name}, call` : "Call"} 911 now if you can. I'm sending ${who} your latest location and what you told me.`;
   }
   switch (reason) {
     case "uneasy_companion":
     case "hands_free_guidance":
-      if (rt.routeChoice === "busier" && rt.interim) return `${hey} Let's get you to ${rt.interim.name}.`;
-      if (rt.routeChoice === "destination") return `${hey} Let's keep heading ${toDest} together.`;
-      return `${hey} Do you want to keep heading ${toDest}, or get somewhere busier first?`;
+      if (rt.routeChoice === "busier" && rt.interim) return `${hey}. I've got the route to ${rt.interim.name}. Let me check what's next.`;
+      if (rt.routeChoice === "destination") return `${hey}. I've got the route. Keep heading ${towardDest} for now.`;
+      return `${hey}. Do you want to keep heading ${toDest}, or get somewhere with more people around first?`;
     case "lost":
     case "navigation_help":
-      return `${hey} Let me check where you are.`;
+      return `${hey}. Let me check where you are.`;
     case "manual_call":
     default:
-      return `${hey} You okay right now?`;
+      return `${hey}, it's Nook. What do you need?`;
   }
 }
 
@@ -793,7 +833,7 @@ export function createBrainEngine(deps: BrainDeps) {
   const hydrated = new Set<string>();
   const usualCache = new Map<string, UsualCells>();
   let bootHydrated = false;
-  const classify = deps.classify ?? (async (text: string) => classifyText(text));
+  const classify: ClassifyInput = deps.classify ?? (async (text, ctx) => classifyLocal(text, ctx));
   const callsEnabled = deps.callsEnabled ?? (() => true);
 
   // handle() and tick() share per-user runtime; run them one at a time.
@@ -1003,7 +1043,11 @@ export function createBrainEngine(deps: BrainDeps) {
     await beginWalk(deps, rt, user, now, trigger, lat, lon);
   }
 
-  /** Final step after check-in + nudge go unanswered, per the user's choice. Never a call. */
+  /**
+   * After the check-in and its one follow-up go unanswered, per the user's
+   * choice. Never a call, and never a more urgent-sounding reminder: "keep
+   * checking in" just checks again later.
+   */
   async function escalate(rt: UserRuntime, user: UserRecord, now: Date) {
     const action = noResponseAction(user);
     const { lat, lon } = lastLatLon(rt, user);
@@ -1011,8 +1055,8 @@ export function createBrainEngine(deps: BrainDeps) {
       rt.checkinKind === "offroute" ? "offroute" : rt.checkinKind === "danger_confirm" ? "unconfirmed" : "quiet";
     rt.escalated = true;
     if (action === "NONE" || !user.trustedContact) {
-      // Floor: never go fully silent, but don't involve anyone.
-      send(rt, user.userId, "nudge", templates.finalNudge);
+      resumeWalking(rt, now, RECHECK_MS);
+      rt.recheckAt = new Date(now.getTime() + RECHECK_MS);
     } else {
       alert(rt, user.userId, contactAlert(kind, userLabel(user), rt.dangerConfirm?.text), lat, lon);
       rt.phase = "ALERTED";
@@ -1067,13 +1111,29 @@ export function createBrainEngine(deps: BrainDeps) {
         const next = user.trustedContact
           ? nextStepLine(noResponseAction(user), timeouts.escalateAfterSec, user.trustedContact.name)
           : "";
-        const lead = rt.checkinKind === "danger_confirm" ? copy.dangerConfirmNudge : copyFor(rt, "nudge");
+        const lead = rt.checkinKind === "danger_confirm" ? copy.dangerConfirmNudge : templates.nudge;
         send(rt, user.userId, "nudge", [lead, next].filter(Boolean).join(" "));
         rt.nudged = true;
         await logRule(deps, user.userId, "R10", rt.walkId, { step: "nudge", kind: rt.checkinKind });
       } else if (rt.nudged && since >= escalateAt) {
         await escalate(rt, user, now);
       }
+    }
+
+    // "Keep checking in": a plain check-in again, at the slower cadence.
+    if (rt.recheckAt && now >= rt.recheckAt && rt.phase === "WALKING" && rt.walkId) {
+      rt.recheckAt = null;
+      const confirming = rt.dangerConfirm != null;
+      openCheckin(
+        rt,
+        user.userId,
+        now,
+        "checkin",
+        confirming ? copy.dangerConfirmNudge : templates.checkinAgain,
+        confirming ? "danger_confirm" : "general",
+        { force: true, ...(confirming && { legend: false }) },
+      );
+      await logRule(deps, user.userId, "R10", rt.walkId, { step: "recheck" });
     }
 
     // R8: no location update for noUpdateMin (walks, or away from home while watching)
@@ -1114,7 +1174,7 @@ export function createBrainEngine(deps: BrainDeps) {
       }
       // Silent until the allowed dwell, then a check-in.
       if (dwellMin > known.allowedDwellMin && canCheckin(rt, now)) {
-        openCheckin(rt, user.userId, now, "checkin");
+        openCheckin(rt, user.userId, now, "checkin", templates.checkinDwell);
         await logRule(deps, user.userId, "R5a", rt.walkId, {
           dwellMin,
           allowed: known.allowedDwellMin,
@@ -1157,15 +1217,7 @@ export function createBrainEngine(deps: BrainDeps) {
     if (rt.phase === "WALKING" && rt.plan && rt.walkStartedAt) {
       const elapsedMin = (now.getTime() - rt.walkStartedAt.getTime()) / 60000;
       if (elapsedMin > rt.plan.lateMin + 10 && canCheckin(rt, now)) {
-        openCheckin(
-          rt,
-          user.userId,
-          now,
-          "checkin",
-          rt.copy?.checkin
-            ? `${rt.copy.checkin} (still out, getting worried)`
-            : "still out? getting worried. you okay?",
-        );
+        openCheckin(rt, user.userId, now, "checkin", templates.checkinLate);
         await logRule(deps, user.userId, "R7b", rt.walkId, { elapsedMin });
       } else if (elapsedMin > rt.plan.lateMin && canCheckin(rt, now)) {
         openCheckin(rt, user.userId, now, "checkin");
@@ -1386,6 +1438,7 @@ export function createBrainEngine(deps: BrainDeps) {
   // --- safety intents -------------------------------------------------------
 
   function recordStatement(rt: UserRuntime, s: Statement) {
+    pushTurn(rt, "user", s.text);
     rt.recentStatements.push(s);
     if (rt.recentStatements.length > RECENT_STATEMENTS) rt.recentStatements.shift();
   }
@@ -1404,21 +1457,11 @@ export function createBrainEngine(deps: BrainDeps) {
       routeChoice: rt.routeChoice ?? "none",
       recentContext: recentContext(rt, now),
       ...(last && { lat: last.lat, lon: last.lon }),
-      openingLine: openingLine(realName(user), reason, rt),
+      openingLine: openingLine(realName(user), reason, rt, user.trustedContact?.name),
     };
   }
 
   function startCall(rt: UserRuntime, user: UserRecord, now: Date, reason: CallReason) {
-    // Demo: every call walks them to the hardcoded Morton Williams pin.
-    rt.interim = {
-      name: SAFE_PLACE.name,
-      lat: SAFE_PLACE.lat,
-      lon: SAFE_PLACE.lon,
-      address: SAFE_PLACE.address,
-      source: "safe_place",
-    };
-    rt.routeChoice = "busier";
-    rt.destNearCount = 0;
     rt.phase = "CALLING";
     rt.channel = "voice";
     rt.callReason = reason;
@@ -1532,7 +1575,8 @@ export function createBrainEngine(deps: BrainDeps) {
     });
   }
 
-  async function onSafe(rt: UserRuntime, user: UserRecord, intent: Extract<SafetyIntent, { kind: "safe" }>, s: Statement, now: Date) {
+  /** Safe, or safe somewhere named (`placeLabel`: "I'm at Sam's"). */
+  async function onSafe(rt: UserRuntime, user: UserRecord, placeLabel: string | undefined, s: Statement, now: Date) {
     const wasDanger = rt.safety === "immediate_danger" || rt.dangerWindow != null;
     const alertedContact = rt.contactAlerted || rt.emergencyAlerted;
     rt.dangerConfirm = null;
@@ -1559,14 +1603,14 @@ export function createBrainEngine(deps: BrainDeps) {
     const fromText = s.source === "text" || s.source === "voice_note";
     if (rt.phase === "CHECKING_IN" || rt.phase === "ALERTED" || rt.phase === "CALLING") {
       await logRule(deps, user.userId, "R9a", rt.walkId, { via: s.source, kind: rt.checkinKind });
-      if (intent.placeLabel && rt.lastPing && deps.persist !== false) {
+      if (placeLabel && rt.lastPing && deps.persist !== false) {
         try {
           await upsertPlaceLabel({
             userId: user.userId,
             cell: toCell(rt.lastPing.lat, rt.lastPing.lon),
             lat: rt.lastPing.lat,
             lon: rt.lastPing.lon,
-            label: intent.placeLabel,
+            label: placeLabel,
             source: "user",
           });
         } catch {
@@ -1588,12 +1632,12 @@ export function createBrainEngine(deps: BrainDeps) {
         return;
       }
       if (rt.checkinKind === "offroute") {
-        await confirmOffRoute(rt, user, now, intent.placeLabel);
+        await confirmOffRoute(rt, user, now, placeLabel);
         resumeWalking(rt, now);
         await persistPhase(deps, rt);
         return;
       }
-      if (fromText && (intent.placeLabel || /\b(i'?m at|staying at)\b/i.test(s.text))) {
+      if (fromText && placeLabel) {
         markSettled(rt);
         await endWalk(deps, rt, "ENDED_ELSEWHERE", now);
         await logRule(deps, user.userId, "R15", null, { via: "reply" });
@@ -1609,7 +1653,7 @@ export function createBrainEngine(deps: BrainDeps) {
       return;
     }
     if (rt.phase === "WALKING") {
-      if (fromText && intent.placeLabel) {
+      if (fromText && placeLabel) {
         markSettled(rt);
         await endWalk(deps, rt, "ENDED_ELSEWHERE", now);
         await logRule(deps, user.userId, "R15", null, { via: "reply" });
@@ -1630,8 +1674,8 @@ export function createBrainEngine(deps: BrainDeps) {
         destination: target,
         now,
       });
-      if (!u.navigationFresh) return copy.navNoFix;
-      return u.instruction ? u.instruction.charAt(0).toLowerCase() + u.instruction.slice(1) : undefined;
+      if (!u.navigationFresh) return copy.navNoFix(rt.stationarySince == null);
+      return u.instruction || undefined;
     } catch (err) {
       console.warn("[brain] navigation failed", err);
       return undefined;
@@ -1640,6 +1684,8 @@ export function createBrainEngine(deps: BrainDeps) {
 
   async function offerBusierPlaces(rt: UserRuntime, user: UserRecord): Promise<string> {
     const last = rt.lastPing;
+    // Asked again before picking: same list, no second lookup.
+    if (rt.offeredPlaces?.length) return copy.busierOptions(rt.offeredPlaces.map(placeLine));
     if (!deps.nav || !last) return copy.busierNone;
     try {
       const options = await deps.nav.findSafeDestinations(last);
@@ -1665,12 +1711,14 @@ export function createBrainEngine(deps: BrainDeps) {
     return offerBusierPlaces(rt, user);
   }
 
+  /** The "I can call and guide you" line, at most once per trip and only if calls work. */
   function withCallOffer(rt: UserRuntime, text: string): string {
-    if (rt.callOffered || rt.phase === "CALLING") return text;
+    if (rt.callOffered || rt.phase === "CALLING" || !callsEnabled()) return text;
     rt.callOffered = true;
-    return `${text}\n${copy.callOffer}`;
+    return `${text}\n\n${copy.callOffer}`;
   }
 
+  /** Uneasy: no contact, no call, no escalation. Ask which way unless they already said. */
   async function onUneasy(rt: UserRuntime, user: UserRecord, intent: Extract<SafetyIntent, { kind: "uneasy" }>, s: Statement, now: Date) {
     rt.dangerConfirm = null;
     await ensureWalk(rt, user, now, "uneasy");
@@ -1683,18 +1731,21 @@ export function createBrainEngine(deps: BrainDeps) {
     await persistPhase(deps, rt);
     await logRule(deps, user.userId, "R9b", rt.walkId, { intent: "uneasy", via: s.source, wants: intent.wants ?? null });
 
-    let text: string;
     if (intent.wants) {
-      text = await applyRouteChoice(rt, user, intent.wants, now);
-    } else if (rt.routeChoice) {
-      const instruction = await navInstruction(rt, user, now);
-      text = [copy.uneasyStillWithYou, instruction].filter(Boolean).join(" ");
-    } else {
-      rt.awaitingRouteChoice = true;
-      const where = intent.lost ? await navInstruction(rt, user, now) : undefined;
-      text = [where, copy.uneasyAsk(tripDestinationName(rt))].filter(Boolean).join("\n");
+      send(rt, user.userId, "checkin", withCallOffer(rt, await applyRouteChoice(rt, user, intent.wants, now)));
+      return;
     }
-    send(rt, user.userId, "checkin", withCallOffer(rt, text));
+    if (rt.routeChoice || rt.awaitingRouteChoice) {
+      // Still uncomfortable after the question: offer all three ways at once.
+      rt.awaitingRouteChoice = true;
+      if (callsEnabled()) rt.callOffered = true;
+      send(rt, user.userId, "checkin", copy.stillUneasy(callsEnabled()));
+      return;
+    }
+    rt.awaitingRouteChoice = true;
+    const where = intent.lost ? await navInstruction(rt, user, now) : undefined;
+    const ask = copy.uneasyAsk(tripDestinationName(rt), busierPlace(intent.detail, rt.busierTurn++));
+    send(rt, user.userId, "checkin", withCallOffer(rt, [where, ask].filter(Boolean).join("\n\n")));
   }
 
   async function onRouteChoiceIntent(rt: UserRuntime, user: UserRecord, choice: RouteChoice, s: Statement, now: Date) {
@@ -1714,17 +1765,29 @@ export function createBrainEngine(deps: BrainDeps) {
     send(rt, user.userId, "checkin", copy.busierPicked(option.name, await navInstruction(rt, user, now)));
   }
 
+  /** Call request: a channel change, not a safety change. Never during immediate danger. */
   async function onCall(rt: UserRuntime, user: UserRecord, intent: Extract<SafetyIntent, { kind: "call" }>, s: Statement, now: Date) {
+    if (rt.safety === "immediate_danger") {
+      // 911 takes precedence; Nook doesn't start a call once danger is established.
+      if (rt.phase !== "CALLING") send(rt, user.userId, "checkin", copy.dangerStill(user.trustedContact?.name));
+      await logRule(deps, user.userId, "R11", rt.walkId, { via: s.source, call: "refused_in_danger" });
+      return;
+    }
     await ensureWalk(rt, user, now, "call_me");
+    const uneasy = intent.uneasy === true || intent.reason === "uneasy_companion";
+    if (uneasy && rt.safety === "safe") await setSafety(rt, "uneasy");
     const reason: CallReason =
       intent.reason && intent.reason !== "manual_call"
         ? intent.reason
         : rt.safety === "uneasy"
           ? "uneasy_companion"
           : "manual_call";
-    if (reason === "uneasy_companion" && rt.safety === "safe") await setSafety(rt, "uneasy");
     rt.dangerConfirm = null;
     rt.awaitingRouteChoice = false;
+    if (rt.phase === "CALLING") {
+      await logRule(deps, user.userId, "R11", rt.walkId, { via: s.source, reason, call: "already_calling" });
+      return;
+    }
     if (!callsEnabled()) {
       if (rt.phase === "CHECKING_IN") resumeWalking(rt, now, UNEASY_SNOOZE_MS);
       send(rt, user.userId, "checkin", copy.callsUnavailable);
@@ -1739,8 +1802,9 @@ export function createBrainEngine(deps: BrainDeps) {
   async function onDanger(rt: UserRuntime, user: UserRecord, intent: Extract<SafetyIntent, { kind: "danger" }>, s: Statement, now: Date) {
     await ensureWalk(rt, user, now, "danger");
     if (!intent.clear && rt.safety !== "immediate_danger") {
-      // Ambiguous: ask before alerting anyone. Silence escalates like any check-in.
+      // Ambiguous: ask before alerting anyone. Silence is handled like any check-in.
       rt.dangerConfirm = s;
+      rt.awaitingRouteChoice = false;
       openCheckin(rt, user.userId, now, "checkin", copy.dangerConfirm, "danger_confirm", { legend: false, force: true });
       await persistPhase(deps, rt);
       await logRule(deps, user.userId, "R11", rt.walkId, { step: "danger_confirm", via: s.source });
@@ -1749,8 +1813,8 @@ export function createBrainEngine(deps: BrainDeps) {
     const statements: Statement[] = rt.dangerConfirm ? [rt.dangerConfirm] : [s];
     const confirmation = rt.dangerConfirm
       ? s.source === "reaction"
-        ? "tapped ‼️ when nook asked if they're in immediate danger"
-        : `answered "${s.text.slice(0, 80)}" when nook asked if they're in immediate danger`
+        ? "tapped ‼️ when Nook asked if they're in immediate danger"
+        : `answered "${s.text.slice(0, 80)}" when Nook asked if they're in immediate danger`
       : undefined;
     if (rt.dangerConfirm && s.voiceNote) statements.push(s);
     rt.dangerConfirm = null;
@@ -1759,6 +1823,7 @@ export function createBrainEngine(deps: BrainDeps) {
     const firstTime = rt.safety !== "immediate_danger" || !rt.emergencyAlerted;
     await setSafety(rt, "immediate_danger");
     rt.dangerWindow ??= { openedAt: now, forwarded: new Set() };
+    // An existing call carries on; Nook never starts one here.
     const onCall = rt.phase === "CALLING";
     if (!onCall) {
       rt.phase = "ALERTED";
@@ -1773,9 +1838,8 @@ export function createBrainEngine(deps: BrainDeps) {
       await logRule(deps, user.userId, "R11", rt.walkId, { step: "danger_repeat", via: s.source });
       return;
     }
-    const alsoCall = intent.wantsCall === true && !onCall && callsEnabled();
     if (s.source !== "voice_call") {
-      send(rt, user.userId, "checkin", copy.dangerGuidance(user.trustedContact?.name, alsoCall));
+      send(rt, user.userId, "checkin", copy.dangerGuidance(user.trustedContact?.name, intent.wantsCall === true));
     }
     if (user.trustedContact) {
       await sendEmergencyAlert(
@@ -1788,17 +1852,40 @@ export function createBrainEngine(deps: BrainDeps) {
         confirmation,
       );
     }
-    if (alsoCall) startCall(rt, user, now, "manual_call");
     await logRule(deps, user.userId, "R11", rt.walkId, {
       step: "danger",
       via: s.source,
       contact: Boolean(user.trustedContact),
-      call: alsoCall,
     });
   }
 
+  /** Stop checking in / tracking this trip. Not while immediate danger is open. */
+  async function onStop(rt: UserRuntime, user: UserRecord, now: Date) {
+    if (rt.safety === "immediate_danger") {
+      send(rt, user.userId, "checkin", copy.dangerStill(user.trustedContact?.name));
+      return;
+    }
+    const hadTrip =
+      rt.walkId != null ||
+      rt.phase === "PROMPTED" ||
+      rt.phase === "CHECKING_IN" ||
+      rt.phase === "CALLING" ||
+      rt.phase === "ALERTED";
+    const walkId = rt.walkId;
+    if (rt.walkId) await endWalk(deps, rt, "ENDED_ELSEWHERE", now);
+    else {
+      rt.phase = "IDLE";
+      rt.checkinOpenedAt = null;
+      rt.checkinKind = null;
+      rt.nudged = false;
+      rt.escalated = false;
+    }
+    rt.cooldownUntil = new Date(now.getTime() + PROMPT_COOLDOWN_MS);
+    send(rt, user.userId, "ended", hadTrip ? copy.dismissed : copy.dismissedIdle);
+    await logRule(deps, user.userId, "R3", walkId, { reply: "dismiss" });
+  }
+
   async function onUnclear(rt: UserRuntime, user: UserRecord, s: Statement) {
-    brainLog(deps, `intent=unclear phase=${rt.phase}`);
     if (rt.dangerConfirm) {
       send(rt, user.userId, "checkin", copy.dangerConfirm);
       return;
@@ -1807,47 +1894,92 @@ export function createBrainEngine(deps: BrainDeps) {
       send(rt, user.userId, "prompt", copy.greetingPrompted);
       return;
     }
-    if (rt.awaitingRouteChoice) {
-      send(rt, user.userId, "checkin", copy.uneasyAsk(tripDestinationName(rt)));
+    if (rt.awaitingRouteChoice || rt.offeredPlaces) {
+      send(
+        rt,
+        user.userId,
+        "checkin",
+        rt.offeredPlaces
+          ? copy.busierOptions(rt.offeredPlaces.map(placeLine))
+          : copy.uneasyAsk(tripDestinationName(rt), busierPlace(undefined, rt.busierTurn++)),
+      );
       return;
     }
     const inWalk =
       rt.phase === "CHECKING_IN" || rt.phase === "WALKING" || rt.phase === "ALERTED" || rt.phase === "CALLING";
     if (inWalk) {
-      send(rt, user.userId, "nudge", withLegend(copyFor(rt, "unclear")));
+      send(rt, user.userId, "nudge", templates.unclear);
       await logRule(deps, user.userId, "R9b", rt.walkId, { status: "unclear", via: s.source });
       return;
     }
     if (rt.phase === "IDLE") send(rt, user.userId, "prompt", copy.idleUnclear);
   }
 
-  /** One entry point for 👍 👎 ❓ ‼️, typed text, voice-note transcripts and call reports. */
-  async function applyIntent(rt: UserRuntime, user: UserRecord, intent: SafetyIntent, s: Statement, now: Date) {
+  /**
+   * The one place a classified message changes state, for 👍 👎 ❓ ‼️, typed
+   * text, voice-note transcripts and call reports alike. The classifier only
+   * names the intent; everything below decides what happens.
+   */
+  async function applyIntent(
+    rt: UserRuntime,
+    user: UserRecord,
+    intent: SafetyIntent,
+    s: Statement,
+    now: Date,
+    meta: { messageId?: string; classifier: ClassifierUsed },
+  ) {
     if (s.source !== "reaction" || intent.kind !== "safe") recordStatement(rt, s);
-    brainLog(deps, `intent=${intent.kind}${intent.kind === "danger" ? (intent.clear ? " (clear)" : " (ambiguous)") : ""} via ${s.source}`);
-    if (deps.persist !== false && s.source !== "reaction") {
-      await logRule(deps, user.userId, "R9b", rt.walkId, {
-        step: "statement",
-        intent: intent.kind,
-        source: s.source,
-        text: s.text.slice(0, 280),
-        ...(s.voiceNote && { voiceNoteId: s.voiceNote.id }),
-      });
-    }
+    rt.recheckAt = null;
+    const before = rt.safety;
+    const firstAction = rt.pendingActions.length;
     switch (intent.kind) {
       case "safe":
-        return onSafe(rt, user, intent, s, now);
+        await onSafe(rt, user, undefined, s, now);
+        break;
+      case "place":
+        await onSafe(rt, user, intent.label, s, now);
+        break;
       case "uneasy":
-        return onUneasy(rt, user, intent, s, now);
+        await onUneasy(rt, user, intent, s, now);
+        break;
       case "route_choice":
-        return onRouteChoiceIntent(rt, user, intent.choice, s, now);
+        await onRouteChoiceIntent(rt, user, intent.choice, s, now);
+        break;
       case "call":
-        return onCall(rt, user, intent, s, now);
+        await onCall(rt, user, intent, s, now);
+        break;
       case "danger":
-        return onDanger(rt, user, intent, s, now);
+        await onDanger(rt, user, intent, s, now);
+        break;
+      case "stop":
+        await onStop(rt, user, now);
+        break;
       case "unclear":
-        return onUnclear(rt, user, s);
+        await onUnclear(rt, user, s);
+        break;
     }
+    const effects = rt.pendingActions.slice(firstAction).map((a) =>
+      a.type === "AlertContact" ? (a.emergency ? (a.followUp ? "ForwardVoiceNote" : "EmergencyAlert") : "ContactAlert") : a.type,
+    );
+    const label = `${intent.kind}${intent.kind === "danger" ? (intent.clear ? "(clear)" : "(ambiguous)") : ""}`;
+    brainLog(
+      deps,
+      `intent msg=${meta.messageId ?? "-"} source=${s.source} classifier=${meta.classifier} intent=${label} safety=${before}→${rt.safety} effects=[${effects.join(",")}]`,
+    );
+    // The one record of what they said; other logs carry only the intent.
+    await logRule(deps, user.userId, "R9b", rt.walkId, {
+      step: "statement",
+      messageId: meta.messageId ?? null,
+      source: s.source,
+      classifier: meta.classifier,
+      intent: intent.kind,
+      ...(intent.kind === "danger" && { clear: intent.clear }),
+      safetyBefore: before,
+      safetyAfter: rt.safety,
+      effects,
+      ...(s.source !== "reaction" && { text: s.text.slice(0, 280) }),
+      ...(s.voiceNote && { voiceNoteId: s.voiceNote.id }),
+    });
   }
 
   async function setDestinationFrom(rt: UserRuntime, user: UserRecord, dest: Destination, now: Date) {
@@ -1898,8 +2030,8 @@ export function createBrainEngine(deps: BrainDeps) {
     const m = raw.trim().match(DEST_TEXT_RE);
     const place = (m?.[1] ?? m?.[2] ?? m?.[3])?.replace(/[.!]+$/, "").trim();
     // "i'm going to call 911" must never be geocoded into a destination.
-    const plain = classifyText(raw).kind;
-    const safeToGeocode = plain === "unclear" || plain === "safe" || plain === "route_choice";
+    const plain = classifyLocal(raw).intent.kind;
+    const safeToGeocode = plain === "unclear" || plain === "safe" || plain === "route_choice" || plain === "place";
     if (place && safeToGeocode && !/^(home|my place|my apartment|bed)$/i.test(place) && deps.nav) {
       const found = await deps.nav.geocode(place, near).catch(() => null);
       if (found) return { name: found.name, lat: found.lat, lon: found.lon, ...(found.address && { address: found.address }), source: "text" };
@@ -1921,6 +2053,13 @@ export function createBrainEngine(deps: BrainDeps) {
     if (event.type === "UserReaction") {
       const intent = reactionIntent(event.emoji);
       if (!intent) return rt.pendingActions;
+      const repeat = event.messageId
+        ? seenBefore(rt, `reaction:${event.messageId}`, now)
+        : seenBefore(rt, `reaction:${event.emoji}:${event.targetMessageId}`, now, REACTION_DEDUP_MS);
+      if (repeat) {
+        brainLog(deps, `duplicate reaction ${event.messageId ?? event.targetMessageId} ignored`);
+        return rt.pendingActions;
+      }
       // Legacy R2 prompt: 👍 starts the walk, 👎 declines it.
       if (rt.phase === "PROMPTED" && (intent.kind === "safe" || intent.kind === "uneasy")) {
         if (intent.kind === "safe") {
@@ -1939,22 +2078,31 @@ export function createBrainEngine(deps: BrainDeps) {
       }
       // A stray 👍 with nothing open is just a like.
       if (intent.kind === "safe" && rt.phase === "IDLE" && !rt.dangerConfirm) return rt.pendingActions;
-      const label = { safe: "tapped 👍 (safe)", uneasy: "tapped 👎 (uneasy)", call: "tapped ❓ (call me)", danger: "tapped ‼️ (immediate danger)" };
+      const label: Partial<Record<SafetyIntent["kind"], string>> = {
+        safe: 'tapped 👍 ("I\'m good")',
+        uneasy: 'tapped 👎 ("Something feels off")',
+        call: 'tapped ❓ ("Call me")',
+        danger: 'tapped ‼️ ("I need help now")',
+      };
       await applyIntent(rt, user, intent, {
-        text: label[intent.kind as keyof typeof label] ?? event.emoji,
+        text: label[intent.kind] ?? event.emoji,
         source: "reaction",
         at: now,
-      }, now);
+      }, now, { classifier: "reaction", ...(event.messageId && { messageId: event.messageId }) });
       return rt.pendingActions;
     }
 
     if (event.type === "UserText") {
+      if (seenBefore(rt, `msg:${event.messageId}`, now)) {
+        brainLog(deps, `duplicate message ${event.messageId} ignored`);
+        return rt.pendingActions;
+      }
       const raw = event.text.trim();
       const lower = raw.toLowerCase();
       const note = event.voiceNote;
       const source: InputSource = note ? "voice_note" : "text";
       const statement: Statement = { text: raw, source, at: now, ...(note && { voiceNote: note }) };
-      brainLog(deps, `${source} phase=${rt.phase}`, JSON.stringify(raw.slice(0, 80)));
+      brainLog(deps, `${source} msg=${event.messageId} phase=${rt.phase} chars=${raw.length}`);
 
       // During an open emergency every voice note goes to the contact, transcribed or not.
       if (note && rt.dangerWindow) forwardVoiceNote(rt, user, note, raw, now);
@@ -1977,51 +2125,15 @@ export function createBrainEngine(deps: BrainDeps) {
         return rt.pendingActions;
       }
 
-      // Pending "are you in immediate danger right now?"
-      if (rt.dangerConfirm) {
-        const yes = parseYesNo(raw);
-        if (yes === true) {
-          await applyIntent(rt, user, { kind: "danger", clear: true, quote: raw }, statement, now);
-          return rt.pendingActions;
-        }
-        if (yes === false) {
-          await applyIntent(rt, user, { kind: "uneasy", detail: raw }, statement, now);
-          return rt.pendingActions;
-        }
-      }
-
       // Busier place picked by number
       if (rt.offeredPlaces) {
         const n = raw.match(/^\s*(?:option |number |#)?([1-9])\s*[.!]?\s*$/i)?.[1];
         const option = n ? rt.offeredPlaces[Number(n) - 1] : undefined;
         if (option) {
+          pushTurn(rt, "user", raw);
           await pickOfferedPlace(rt, user, option, now);
           return rt.pendingActions;
         }
-      }
-
-      // Dismiss: stop watching / stop check-ins for this trip
-      if (isDismissText(raw) && rt.safety !== "immediate_danger") {
-        brainLog(deps, "intent=dismiss");
-        const hadTrip =
-          rt.walkId != null ||
-          rt.phase === "PROMPTED" ||
-          rt.phase === "CHECKING_IN" ||
-          rt.phase === "CALLING" ||
-          rt.phase === "ALERTED";
-        const walkId = rt.walkId;
-        if (rt.walkId) await endWalk(deps, rt, "ENDED_ELSEWHERE", now);
-        else {
-          rt.phase = "IDLE";
-          rt.checkinOpenedAt = null;
-          rt.checkinKind = null;
-          rt.nudged = false;
-          rt.escalated = false;
-        }
-        rt.cooldownUntil = new Date(now.getTime() + PROMPT_COOLDOWN_MS);
-        send(rt, user.userId, "ended", hadTrip ? copy.dismissed : copy.dismissedIdle);
-        await logRule(deps, user.userId, "R3", walkId, { reply: "dismiss" });
-        return rt.pendingActions;
       }
 
       // Greeting — never a check-in
@@ -2066,33 +2178,39 @@ export function createBrainEngine(deps: BrainDeps) {
         return rt.pendingActions;
       }
 
-      let intent: SafetyIntent;
-      if (isAffirmativeText(raw)) {
-        intent = { kind: "safe" };
-      } else {
-        try {
-          intent = await classify(raw);
-        } catch {
-          intent = classifyText(raw);
-          brainLog(deps, "classify error → regex");
-        }
+      const ctx: ClassifyContext = {
+        safetyState: rt.safety,
+        awaiting: awaitingOf(rt),
+        ...(rt.walkId && { destination: tripDestinationName(rt) }),
+        recent: rt.recentTurns.slice(-RECENT_TURNS),
+      };
+      let result: { intent: SafetyIntent; classifier: ClassifierUsed };
+      try {
+        result = await classify(raw, ctx);
+      } catch {
+        result = { ...classifyLocal(raw, ctx), classifier: "fallback" };
       }
-      // "keep going" / "busier" only mean something once the question was asked.
+      let intent = result.intent;
+      // "keep going" / "busier" only mean something on a trip.
       if (intent.kind === "route_choice" && !rt.walkId) intent = { kind: "unclear" };
-      await applyIntent(rt, user, intent, statement, now);
+      await applyIntent(rt, user, intent, statement, now, { messageId: event.messageId, classifier: result.classifier });
       return rt.pendingActions;
     }
 
     if (event.type === "CallEvent") {
+      const callKey = `call:${event.walkId}:${event.callType}:${event.situation?.trim() ?? ""}`;
+      if (seenBefore(rt, callKey, now, CALL_EVENT_DEDUP_MS)) {
+        brainLog(deps, `duplicate call event ${event.callType} for ${event.walkId} ignored`);
+        return rt.pendingActions;
+      }
       const sameWalk = rt.walkId === event.walkId;
       const call: Statement = { text: event.situation?.trim() || "", source: "voice_call", at: now };
       if (event.callType === "request_escalation") {
         // Safety first: act even if the call isn't tied to the current walk.
-        await applyIntent(rt, user, {
-          kind: "danger",
-          clear: true,
-          ...(call.text && { quote: call.text }),
-        }, { ...call, text: call.text || "asked on the call for their trusted contact to be reached" }, now);
+        const text = call.text || "asked on the call for their trusted contact to be reached";
+        await applyIntent(rt, user, { kind: "danger", clear: true, quote: text }, { ...call, text }, now, {
+          classifier: "deterministic",
+        });
         return rt.pendingActions;
       }
       if (!sameWalk) {
@@ -2107,7 +2225,9 @@ export function createBrainEngine(deps: BrainDeps) {
         return rt.pendingActions;
       }
       if (event.callType === "resolved_safe") {
-        await applyIntent(rt, user, { kind: "safe" }, { ...call, text: call.text || "said on the call they're okay" }, now);
+        await applyIntent(rt, user, { kind: "safe" }, { ...call, text: call.text || "said on the call they're okay" }, now, {
+          classifier: "deterministic",
+        });
         rt.channel = "text";
         return rt.pendingActions;
       }
@@ -2228,24 +2348,8 @@ export function createBrainEngine(deps: BrainDeps) {
       const last = found?.rt.lastPing;
       if (!found || !last) return { ok: false, error: "no live location for this walk" };
       if (!deps.nav) return { ok: false, error: "navigation isn't configured" };
-      const meters = distanceM(last.lat, last.lon, SAFE_PLACE.lat, SAFE_PLACE.lon);
-      const places: SafePlaceOption[] = [
-        {
-          rank: 1,
-          id: "morton-williams",
-          name: SAFE_PLACE.name,
-          category: "grocery",
-          address: SAFE_PLACE.address,
-          lat: SAFE_PLACE.lat,
-          lon: SAFE_PLACE.lon,
-          openNow: true,
-          hours: SAFE_PLACE.open,
-          distanceM: Math.round(meters),
-          walkMin: Math.max(1, Math.round(meters / 80)),
-          source: "geoapify",
-        },
-      ];
-      found.rt.offeredPlaces = places;
+      const places = await deps.nav.findSafeDestinations(last);
+      found.rt.offeredPlaces = places.length ? places : null;
       return {
         ok: true,
         source: deps.nav.providerName,
@@ -2260,7 +2364,9 @@ export function createBrainEngine(deps: BrainDeps) {
           walk_minutes: p.walkMin,
           distance_m: p.distanceM,
         })),
-        note: "Demo: the only place is Morton Williams. Say that, then call set_destination with place_id morton-williams and speak the say line.",
+        note: places.length
+          ? "These places are marked open all night in the map data. Offer at most the top two by name."
+          : "No place open all night was found nearby. Suggest staying on main, well-lit streets.",
       };
     });
   }
@@ -2281,24 +2387,7 @@ export function createBrainEngine(deps: BrainDeps) {
         rt.routeChoice = "destination";
         await persistSafety(deps, rt, { interim: null, routeChoice: "destination", ...(c === "home" && { destination: null }) });
       } else {
-        const option =
-          rt.offeredPlaces?.find((p) => p.id.toLowerCase() === c || p.name.toLowerCase() === c || String(p.rank) === c) ??
-          (c === "morton-williams" || c === "morton williams" || c === "1"
-            ? {
-                rank: 1,
-                id: "morton-williams",
-                name: SAFE_PLACE.name,
-                category: "grocery" as const,
-                address: SAFE_PLACE.address,
-                lat: SAFE_PLACE.lat,
-                lon: SAFE_PLACE.lon,
-                openNow: true,
-                hours: SAFE_PLACE.open,
-                distanceM: 0,
-                walkMin: 1,
-                source: "geoapify" as const,
-              }
-            : undefined);
+        const option = rt.offeredPlaces?.find((p) => p.id.toLowerCase() === c || p.name.toLowerCase() === c || String(p.rank) === c);
         if (!option) return { ok: false, error: "unknown place_id; call get_safe_destinations first" };
         rt.interim = { name: option.name, lat: option.lat, lon: option.lon, ...(option.address && { address: option.address }), source: "tool" };
         rt.routeChoice = "busier";
@@ -2341,6 +2430,37 @@ export function createBrainEngine(deps: BrainDeps) {
     });
   }
 
+  /** Demo recording: forget everything in memory, prompt cooldown included. */
+  function demoReset(userId: string): Promise<void> {
+    return serialize(async () => {
+      await ensureHydrated(userId);
+      const rt = rtFor(userId);
+      if (rt.walkId) await endWalk(deps, rt, "ENDED_ELSEWHERE", deps.clock.now());
+      states.set(userId, emptyRuntime());
+      usualCache.delete(userId);
+      brainLog(deps, `demo reset ${userId}`);
+    });
+  }
+
+  /** Demo recording: open a walk as if they'd said yes at `at`, without sending anything. */
+  function demoStartWalk(userId: string, at: Date, lat: number, lon: number): Promise<void> {
+    return serialize(async () => {
+      await ensureHydrated(userId);
+      const user = await deps.getUser(userId);
+      if (!user) throw new Error(`unknown user ${userId}`);
+      await beginWalk(deps, rtFor(userId), user, at, "prompt", lat, lon);
+    });
+  }
+
+  /** Demo recording: no more check-ins or nudges until `until`; the walk, call and danger state stay. */
+  function demoHush(userId: string, until: Date): Promise<void> {
+    return serialize(async () => {
+      const rt = rtFor(userId);
+      rt.suppressCheckinUntil = until;
+      rt.checkinOpenedAt = null;
+    });
+  }
+
   function getPhase(userId: string): WalkPhase {
     return rtFor(userId).phase;
   }
@@ -2360,8 +2480,11 @@ export function createBrainEngine(deps: BrainDeps) {
     getPhase,
     getRuntime,
     ensureHydrated,
+    demo: { reset: demoReset, startWalk: demoStartWalk, hush: demoHush },
   };
 }
+
+export type DemoHooks = ReturnType<typeof createBrainEngine>["demo"];
 
 const DEMO_FALLBACK = { lat: 40.8075, lon: -73.9626 };
 

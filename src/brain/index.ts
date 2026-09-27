@@ -1,5 +1,5 @@
 import type { Brain, ClassifyInput, Clock } from "../shared/types.ts";
-import { createBrainEngine } from "./engine.ts";
+import { createBrainEngine, type DemoHooks } from "./engine.ts";
 import type { UserRecord } from "../store/types.ts";
 import { createTigerUserStore } from "../store/users.ts";
 import { createLlm, type Llm } from "../llm/index.ts";
@@ -23,6 +23,7 @@ export interface CreateBrainOptions {
 export function createBrain(opts: CreateBrainOptions): Brain & {
   getPhase: (userId: string) => string;
   getRuntime: (userId: string) => unknown;
+  demo: DemoHooks;
 } {
   const store = createTigerUserStore();
   const getUser =
@@ -54,8 +55,9 @@ export function createBrain(opts: CreateBrainOptions): Brain & {
     navigation: engine.navigation,
     getPhase: engine.getPhase,
     getRuntime: engine.getRuntime,
+    demo: engine.demo,
   };
 }
 
-export { createBrainEngine } from "./engine.ts";
+export { createBrainEngine, type DemoHooks } from "./engine.ts";
 export { createEchoBrain } from "./stubEcho.ts";

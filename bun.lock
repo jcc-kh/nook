@@ -9,6 +9,7 @@
         "@photon-ai/advanced-imessage": "^2.2.0",
         "pg": "^8.16.3",
         "spectrum-ts": "^12.10.1",
+        "zod": "^4.6.5",
       },
       "devDependencies": {
         "@types/bun": "latest",

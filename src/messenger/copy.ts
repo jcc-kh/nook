@@ -6,15 +6,10 @@ import {
   type NoResponseAction,
   type TrustedContact,
 } from "../shared/settings.ts";
-import { LEGEND, tripStart, withLegend } from "../shared/templates.ts";
+import { LEGEND_OPTIONS, tripStart, withLegend } from "../shared/templates.ts";
 import type { UserRecord } from "../store/index.ts";
 
-/** Trusted contact as the user refers to them ("Alex" / "my trusted person"). */
-function theirs(contact?: TrustedContact): string {
-  return contact?.name ?? "my trusted person";
-}
-
-/** Trusted contact as Nook refers to them ("Alex" / "your trusted contact"). */
+/** Trusted contact as Nook refers to them ("Sam" / "your trusted contact"). */
 function yours(contact?: TrustedContact): string {
   return contact?.name ?? "your trusted contact";
 }
@@ -28,34 +23,34 @@ const monitoringLabel: Record<MonitoringMode, string> = {
   AWAY_FROM_HOME: "when you're out and moving",
 };
 
-/** User's voice, used in the settings summary. */
+/** Settings summary line. */
 function escalationSummary(action: NoResponseAction, c?: TrustedContact): string {
   switch (action) {
     case "CONTACT_TRUSTED":
-      return `text me first, then text ${theirs(c)} my location`;
+      return `text ${yours(c)} your location`;
     case "NONE":
-      return "text me first, then just keep checking in";
+      return "keep checking in";
   }
 }
 
-/** Nook's voice: what happens if a check-in can't confirm they're okay. */
+/** What happens if a check-in and one follow-up go unanswered. */
 function escalationPlan(action: NoResponseAction, c?: TrustedContact): string {
   switch (action) {
     case "CONTACT_TRUSTED":
-      return `i'll text ${yours(c)} your location`;
+      return `I'll text ${yours(c)} your location`;
     case "NONE":
-      return "i'll just keep checking in with you";
+      return "I'll keep checking in";
   }
 }
 
 export function learnedSummary(r: LearnedRoutine): string {
   const lines = [
-    r.frequentPlaces.length ? `places you visit often: ${r.frequentPlaces.join(", ")}` : "",
-    r.commonRoutes.length ? `routes you commonly take: ${r.commonRoutes.join(", ")}` : "",
-    r.usualStops.length ? `usual stops: ${r.usualStops.join(", ")}` : "",
-    r.typicalTripMinutes ? `typical trip: about ${r.typicalTripMinutes} min` : "",
+    r.frequentPlaces.length ? `Places you visit often: ${r.frequentPlaces.join(", ")}` : "",
+    r.commonRoutes.length ? `Routes you commonly take: ${r.commonRoutes.join(", ")}` : "",
+    r.usualStops.length ? `Usual stops: ${r.usualStops.join(", ")}` : "",
+    r.typicalTripMinutes ? `Typical trip: about ${r.typicalTripMinutes} min` : "",
   ].filter(Boolean);
-  return lines.length ? ["here's what i've picked up so far:", ...lines].join("\n") : copy.learnedNothing;
+  return lines.length ? ["Here's what I've picked up so far:", ...lines].join("\n") : copy.learnedNothing;
 }
 
 function contactLabel(c: TrustedContact): string {
@@ -70,219 +65,258 @@ function clockLabel(hhmm: string): string {
   return m ? `${h12}:${String(m).padStart(2, "0")}${suffix}` : `${h12}${suffix}`;
 }
 
-/** Nook's voice: when it will watch without being asked. */
+/** When Nook watches without being asked. */
 function monitoringPlan(user: UserRecord): string {
   switch (user.monitoringMode) {
     case "MANUAL":
-      return "i'll only watch when you ask. text 'walk me home' or 'heading out' when you leave.";
+      return "I'll only watch when you ask. Text 'walk me home' or 'heading out' when you leave.";
     case "AWAY_FROM_HOME":
-      return "if you're away from home and moving, i'll watch quietly. if you were moving and then stop for a few minutes, i'll check in. reply ok if you got where you were going. you can also text 'walk me home' anytime.";
+      return "When you're away from home and moving, I'll keep an eye on things quietly. If you stop for a few minutes, I'll check in. Reply ok if you got where you were going. You can also text 'walk me home' anytime.";
     case "EVENINGS":
     default:
-      return `in the evenings (${clockLabel(user.nightStart ?? "22:00")}-${clockLabel(user.nightEnd ?? "06:00")}), if you're not home, i'll ask if you're heading home. you can also text 'walk me home' anytime.`;
+      return `In the evenings (${clockLabel(user.nightStart ?? "22:00")}-${clockLabel(user.nightEnd ?? "06:00")}), if you're not home, I'll ask if you're heading home. You can also text 'walk me home' anytime.`;
   }
 }
 
 function timingSummary(t: Required<CheckinTimeouts>): string {
-  return `nudge after ${t.nudgeAfterSec}s, next step ${t.escalateAfterSec}s after that, check in if your location stops for ${t.noUpdateMin} min`;
+  return `follow up after ${t.nudgeAfterSec}s, next step ${t.escalateAfterSec}s after that, check in if your location stops for ${t.noUpdateMin} min`;
+}
+
+/** Places, varied by situation so Nook doesn't repeat one stock phrase. */
+const BUSIER_PLACES = [
+  "somewhere with more people around",
+  "to an open public place",
+  "to a busier street",
+  "somewhere well-lit",
+] as const;
+
+/** Picks the "somewhere busier" wording from what they said, rotating otherwise. */
+export function busierPlace(detail: string | undefined, turn: number): string {
+  const d = detail?.toLowerCase() ?? "";
+  if (/\b(dark|unlit|no lights?|pitch black)\b/.test(d)) return "somewhere well-lit";
+  if (/\b(no one|nobody|noone|empty|deserted|alone)\b/.test(d)) return "somewhere with more people around";
+  if (/\b(lost|which way|wrong way|side street|alley)\b/.test(d)) return "to a busier street";
+  return BUSIER_PLACES[turn % BUSIER_PLACES.length]!;
 }
 
 export const copy = {
-  askContact: "who should i contact if something seems wrong? send me their name and phone number (or share their contact card).",
+  askContact: "Who should I contact if something seems wrong? Send me their name and phone number, or share their contact card.",
   /** First message to a new user: who Nook is, then the first question. */
   welcome:
-    "hi, i'm nook 🌙 i keep an eye on your trips and check in if something seems off.\n\n" +
-    "when i check in, just reply, or tap a shortcut:\n" +
-    "👍 safe\n👎 uneasy, i'll help you pick a way or somewhere busier\n❓ call me, for hands-free guidance\n‼️ immediate danger, i'll tell you to call 911 and text your trusted person where you are\n\n" +
-    "first, what's your name?",
-  askUserName: "what's your name? i'll use it when i check in, and so your trusted contact knows who i'm texting about.",
-  badUserName: "just your first name is fine, like 'alex'.",
-  userNameSaved: (name: string) => `nice to meet you, ${name}.`,
-  confirmUserName: (name: string) => `change your name to ${name}? reply yes to confirm.`,
-  askContactName: "got the number. what's their name?",
-  askContactPhone: (name: string) => `what's ${name}'s phone number?`,
-  badContactName: "just their first name is fine, like 'sam' or 'mom'.",
+    "Hey, I'm Nook 🌙 I keep an eye on your walks and check in if something seems unusual.\n\n" +
+    `You can always text me normally, or use a Tapback: ${LEGEND_OPTIONS}\n\n` +
+    "First, what should I call you?",
+  askUserName: "What should I call you? I'll also use it so your trusted contact knows who I'm texting about.",
+  badUserName: "Just your first name is fine, like 'Alex'.",
+  userNameSaved: (name: string) => `Nice to meet you, ${name}.`,
+  confirmUserName: (name: string) => `Change your name to ${name}? Reply yes to confirm.`,
+  askContactName: "Got the number. What's their name?",
+  askContactPhone: (name: string) => `What's ${name}'s phone number?`,
+  badContactName: "Just their first name is fine, like 'Sam' or 'Mom'.",
   badContact:
-    "that doesn't look like a valid phone number. send it with the area code, like: sam 646 555 1234 (or +44… for other countries).",
-  contactIsSelf: "that's your own number. send the number of someone you trust.",
+    "That doesn't look like a valid phone number. Send it with the area code, like: Sam 646 555 1234 (or +44… for other countries).",
+  contactIsSelf: "That's your own number. Send the number of someone you trust.",
   contactSaved: (c: TrustedContact) =>
-    c.name ? `got it, ${c.name} is your trusted contact.` : "got it, your trusted contact is saved.",
+    c.name ? `Got it. ${c.name} is your trusted contact.` : "Got it. Your trusted contact is saved.",
 
   askMonitoring:
-    "when should i keep an eye on your location?\n1. only when i tell nook i'm heading somewhere\n2. evenings, if i'm not home\n3. whenever i'm away from home and moving",
+    "When should I keep an eye on your location?\n\n1. Only when I tell Nook I'm heading somewhere\n2. Evenings, if I'm not home\n3. Whenever I'm away from home and moving",
 
   askEscalation: (c?: TrustedContact) =>
-    `if something seems unusual, i'll check in with you by text first.\n\nif i check in and can't confirm you're okay:\n1. text ${theirs(c)} my location\n2. just keep checking in with me\n\n(immediate danger is different: if you tap ‼️ or tell me you're in danger, i'll always text ${yours(c)} right away.)`,
+    `If I check in and don't hear back, what should I do?\n\n1. Text ${yours(c)} your location\n2. Keep checking in\n\nIf you tell me you're in immediate danger, I'll alert ${yours(c)} either way.`,
 
   locationRequest:
-    "next, share your location with me using the card below (choose share indefinitely). or reply 'skip' to do it later.",
-  locationTerminal: "(terminal) share a location with /loc <lat> <lon>, or reply 'skip'.",
+    "Next, share your location with me using the card below (choose Share Indefinitely), or reply 'skip' to do it later.",
+  locationTerminal: "(terminal) Share a location with /loc <lat> <lon>, or reply 'skip'.",
   locationWaiting:
-    "i don't see your location yet. tap the card above and choose share indefinitely, or reply 'skip' to do it later.",
-  locationConnected: "location sharing is connected ✓",
-  locationSkipped: "no problem. i can't watch your trips until you share your location with me.",
+    "I don't see your location yet. Tap the card above and choose Share Indefinitely, or reply 'skip' to do it later.",
+  locationConnected: "Location sharing is connected ✓",
+  locationSkipped: "No problem. I can't watch your trips until you share your location with me.",
 
-  askHome: "are you at home right now? reply yes and i'll remember this spot as home, or no.",
-  homeLater: "okay. text 'home' the next time you're there.",
+  askHome: "Are you at home right now? Reply yes and I'll remember this spot as home, or no.",
+  homeLater: "Okay. Text 'home' the next time you're there.",
 
   /** Recap of what the user chose, in terms of what Nook will actually do. */
   done(user: UserRecord): string {
-    const lines = ["you're all set 🌙", monitoringPlan(user)];
-    if (user.escalation) {
-      lines.push(
-        `if something looks unusual i'll text you first. if i can't confirm you're okay, ${escalationPlan(user.escalation.onNoTextResponse, user.trustedContact)}.`,
-      );
-    }
-    lines.push(
-      `when i check in: ${LEGEND}. if you tell me you're in immediate danger, i'll tell you to call 911 and text ${yours(user.trustedContact)} your location and what you said. text 'call me' anytime if you want me on the phone.`,
-    );
+    const c = user.trustedContact;
+    const lines = [
+      "You're all set.",
+      monitoringPlan(user),
+      "If something feels off, I can help you keep going or find somewhere with more people around. If you'd rather keep your attention on your surroundings, you can ask me to call and guide you.",
+      c
+        ? `If you need urgent help, use ‼️ or just tell me what's happening. I'll tell you what to do next and send ${yours(c)} your location and what you told me.`
+        : "If you need urgent help, use ‼️ or just tell me what's happening. I'll tell you what to do next.",
+      `You can always reply normally, or use: ${LEGEND_OPTIONS}`,
+    ];
     if (user.homeLat === undefined) {
-      lines.push(
-        "one more thing: text 'home' next time you're there, so i know where home is and can tell when you've made it back.",
-      );
+      lines.push("One more thing: text 'home' next time you're there, so I know where home is and can tell when you've made it back.");
     }
-    lines.push(
-      "text 'settings' anytime to change when i monitor, who i contact, how i escalate, or your check-in timing.",
-    );
+    lines.push("Text 'settings' anytime to change any of this.");
     return lines.join("\n\n");
   },
 
-  pickNumber: (n: number) => `reply with a number from 1 to ${n}.`,
-  yesOrNo: "reply yes or no.",
+  pickNumber: (n: number) => `Reply with a number from 1 to ${n}.`,
+  yesOrNo: "Reply yes or no.",
 
   learnedNothing:
-    "i haven't learned enough about your routine yet. as you use nook, i'll gradually pick up patterns like places you visit often and routes you commonly take.",
+    "I haven't learned enough about your routine yet. As you use Nook, I'll pick up patterns like places you visit often and routes you commonly take.",
 
-  talkLink: (url: string) => `📞 tap to talk to me now: ${url}`,
-  contactAlerted: (name?: string) => `i've let ${name ?? "your trusted contact"} know and sent them your location.`,
+  talkLink: (url: string) => `📞 Tap to talk to me now: ${url}`,
+  contactAlerted: (name?: string) => `I texted ${name ?? "your trusted contact"} your location.`,
   contactUnreachable: (name?: string) =>
-    `i tried to reach ${name ?? "your trusted contact"} but my message didn't go through. if you need help, contact someone directly. reply ok if you're okay.`,
+    `My message to ${name ?? "your trusted contact"} didn't go through. If you need help, contact someone directly. Reply when you can and let me know you're okay.`,
   emergencyDelivered: (name?: string, attachmentsOk = true) =>
     attachmentsOk
-      ? `sent. ${name ?? "your trusted contact"} has your location and what you told me.`
-      : `sent ${name ?? "your trusted contact"} your location and what you told me, but your voice message didn't attach.`,
+      ? `Sent. ${name ?? "Your trusted contact"} has your location and what you told me.`
+      : `Sent. ${name ?? "Your trusted contact"} has your location and what you told me, but your voice message didn't attach.`,
   emergencyFailed: (name?: string) =>
-    `my text to ${name ?? "your trusted contact"} didn't go through. please call 911${name ? ` or ${name}` : ""} directly.`,
-  emergencyNoContact: "i don't have a trusted contact saved, so i couldn't alert anyone. please call 911 directly.",
-  voiceNoteForwarded: (name?: string) => `passed your voice message on to ${name ?? "your trusted contact"}.`,
+    name
+      ? `My message to ${name} didn't go through. Please call 911 or ${name} directly if you can.`
+      : "My message to your trusted contact didn't go through. Please call 911 directly if you can.",
+  emergencyNoContact: "I don't have a trusted contact saved, so I couldn't alert anyone. Please call 911 directly if you can.",
+  voiceNoteForwarded: (name?: string) => `Your voice message was sent to ${name ?? "your trusted contact"} too.`,
   voiceNoteForwardFailed: (name?: string) =>
-    `couldn't forward your voice message to ${name ?? "your trusted contact"}. if you can, call them or 911 directly.`,
+    `I couldn't send your voice message to ${name ?? "your trusted contact"}. Please call ${name ?? "them"} or 911 directly if you can.`,
 
   // --- safety states (see brain/engine.ts applyIntent) ---
-  legend: LEGEND,
   /** Uneasy: ask which way, unless they already said. */
-  uneasyAsk: (dest: string) =>
-    `i've got you. want to keep heading to ${dest}, or go somewhere busier first? reply 'keep going' or 'busier'.`,
-  callOffer: "if you'd rather have me on the phone, text 'call me' or tap ❓.",
+  uneasyAsk: (dest: string, place = "somewhere with more people around") =>
+    `Got it. Do you want to keep heading ${toDestination(dest)}, or get ${place} first?`,
+  callOffer: `If you'd rather keep your attention on your surroundings, I can call and guide you. Say "call me" or tap ❓.`,
   uneasyKeepGoing: (dest: string, instruction?: string) =>
-    [`okay, keep heading to ${dest}. i'm watching your location.`, instruction].filter(Boolean).join(" "),
+    `Okay. Keep heading ${toDestination(dest)}. ${instruction ? withPeriod(instruction) : "I'll keep tracking the route."}`,
   busierOptions: (lines: string[]) =>
-    `closest busier spots that look open:\n${lines.join("\n")}\nreply 1-${lines.length} and i'll route you there, or 'keep going' to stay on your way.`,
+    `Here are a few nearby places that appear to be open:\n\n${lines.join("\n")}\n\nSend the number you want, or say "keep going" to stay on your route.`,
   busierNone:
-    "i couldn't find an open place near you in my data. stick to main streets with lights and people, and text 'call me' if you want me on the phone.",
+    "I couldn't find a nearby open place with enough information to route you there reliably. If you can, head toward a main street or somewhere with people around. You can also ask me to call.",
   busierPicked: (name: string, instruction?: string) =>
-    [`okay, heading to ${name}. i'll watch until you're there.`, instruction].filter(Boolean).join(" "),
-  navNoFix: "i can't see a fresh location for you right now, so i can't give turn directions. stick to busy, lit streets.",
-  uneasyStillWithYou: "i'm still with you. keep to busy, lit streets. text 'call me' if you want me on the phone.",
+    `Okay. Head toward ${name}. ${instruction ? withPeriod(instruction) : "I'll guide you from here."}`,
+  navNoFix: (moving: boolean) =>
+    moving
+      ? "Your location hasn't updated recently enough for me to give you a reliable turn. Keep to main streets for now while I wait for a fresh update."
+      : "Your location hasn't updated recently enough for me to give you a reliable turn. Stay somewhere visible or near an open public place while I wait for a fresh update.",
+  /** Uneasy again after a route was already chosen. */
+  stillUneasy: (callsOn: boolean) =>
+    callsOn
+      ? "Got it. Do you want to keep going, find somewhere with more people around, or have me call?"
+      : "Got it. Do you want to keep going, or find somewhere with more people around?",
 
   /** Ambiguous danger: confirm before alerting anyone. */
-  dangerConfirm: "are you in immediate danger right now? reply yes or no.",
-  dangerConfirmNudge: "are you in immediate danger? reply yes or no, or tap ‼️ if yes.",
-  dangerGuidance: (contactName: string | undefined, calling: boolean) =>
-    [
-      "if you can, call 911 now.",
-      contactName
-        ? `i'm texting ${contactName} your location and what you told me.`
-        : "i don't have a trusted contact saved, so i can't alert anyone for you.",
-      calling
-        ? "calling you now too."
-        : "if you want me on the phone, text 'call me' or tap ❓. you can also send a voice message and i'll pass it on.",
-    ].join("\n"),
+  dangerConfirm: "Are you in immediate danger right now? Reply yes or no.",
+  dangerConfirmNudge: "Are you in immediate danger right now? Reply yes or no, or tap ‼️ if yes.",
+  /** Confirmed danger. Never offers or starts a Nook call. */
+  dangerGuidance: (contactName: string | undefined, askedForCall: boolean) => {
+    if (!contactName) {
+      return "Call 911 now if you can.\n\nI don't have a trusted contact saved, so I can't alert anyone for you.";
+    }
+    if (askedForCall) return `Call 911 now if you can. I'm sending ${contactName} your current location and what you told me.`;
+    return [
+      "Call 911 now if you can.",
+      `I'm sending ${contactName} your current location and what you told me.`,
+      `If typing is difficult, you can send me a quick voice message and I'll pass it on to ${contactName}.`,
+    ].join("\n\n");
+  },
   dangerStill: (contactName?: string) =>
-    `i'm still here. if you can, call 911. ${contactName ? `${contactName} already has your location.` : ""} reply ok once you're safe.`.replace(/\s+/g, " ").trim(),
-  dangerResolved: "okay, glad you're safe. i'll keep watching your trip.",
+    contactName
+      ? `If you haven't already, call 911 now. ${contactName} has your latest location and what you told me. I'll keep your trip active — let me know when you're safe.`
+      : "If you haven't already, call 911 now. I'll keep your trip active — let me know when you're safe.",
+  dangerResolved: "Glad you're safe. I'll keep monitoring the rest of the trip.",
 
   /** Voice mode. */
-  callStarting: "calling you now. just talk normally, silence is fine.",
-  callEnded: withLegend("call ended. you okay?"),
-  callMissed: withLegend("couldn't reach you on the call. you okay?"),
-  callsUnavailable: "i can't place calls right now, but i'm still here by text. tell me what's going on.",
+  callStarting: "Calling you now.",
+  callEnded: withLegend("The call ended. Everything okay?"),
+  callMissed: withLegend("I couldn't reach you. Everything okay?"),
+  callsUnavailable: "I can't place a call right now, but I can still help here. Tell me what you need.",
   /** Reached the busier stop they picked while uneasy. */
   interimArrived: (name: string, dest: string) =>
-    `you're at ${name}. stay as long as you need. when you're ready, reply 'keep going' and i'll get you to ${dest}.`,
+    `You've reached ${name}. When you're ready to continue ${toDestination(dest)}, just say "keep going."`,
   /** Follow-up to the trusted contact once the user says they're okay. */
-  contactUpdateSafe: (who: string) => `update from nook: ${who} just told me they're okay.`,
+  contactUpdateSafe: (who: string) => `Update from Nook: ${who} just told me they're okay.`,
 
   /** Destinations. */
-  destinationSet: (name: string) => `got it, heading to ${name}. i'll watch that route.`,
-  destinationUnreadable: "couldn't read that link. can you share the place from apple maps, or send the full link or address?",
-  arrivedAt: (name: string) => `made it to ${name} 👍`,
+  destinationSet: (name: string) => `Got it. Heading to ${name}. I'll use that route.`,
+  destinationUnreadable: "I couldn't open that link. Send me the Apple Maps place, full link, or address instead.",
+  arrivedAt: (name: string) => `Looks like you made it to ${name} 👍`,
 
-  voiceNoteUnclear: "got your voice message but couldn't make it out. can you type it?",
-  voiceNoteOnboarding: "i can't use voice messages while we're setting up. can you type your answer?",
+  voiceNoteUnclear: "I received your voice message, but couldn't transcribe it clearly. Can you type what you need instead?",
+  voiceNoteOnboarding: "I can't use voice messages during setup. Could you type your answer?",
 
-  homeSaved: "home saved.",
-  homeNoFix:
-    "i can't see your location right now. make sure location sharing with me is on, then text 'home' again.",
+  homeSaved: "Home saved.",
+  homeNoFix: "I can't see your location right now. Make sure location sharing with me is on, then text 'home' again.",
 
   greetingIdle:
-    "hey. text 'walk me home' when you head out. in the evenings, if you're not home, i'll ask if you're heading home. text 'stop' anytime to dismiss me",
-  greetingPrompted: "still waiting. reply yes to start the walk, or text 'stop' if you're not heading out",
-  greetingWalking: "hey, still with you on this trip. text 'stop' if you don't need me, or text if you need anything",
-  idleUnclear: "i can walk you home, or text 'settings'. didn't catch a trip in that",
+    "Hey. Text 'walk me home' when you head out. In the evenings, if you're not home, I'll ask if you're heading home. Text 'stop' anytime.",
+  greetingPrompted: "Reply yes to start the trip, or text 'stop' if you're not heading out.",
+  greetingWalking: "Hey. I'm keeping an eye on this trip. Text 'stop' if you don't need me, or tell me if you need anything.",
+  idleUnclear: "I didn't catch a trip in that. Text 'walk me home' when you head out, or 'settings' to change your setup.",
   /** Explicit trip start (walk me home / yes to a prompt). */
-  started: tripStart("ok i'm with you. i'll only text if something looks off."),
-  /** Night movement / soft rejoin after a restart. starts tracking, no reaction needed. */
-  nightOut: tripStart("hey, saw that you were out. it's getting late, i'll walk you home."),
+  started: tripStart("Got it. I'll keep an eye on the trip and check in if something seems unusual."),
+  /** Movement detected outside the night window. */
+  tripDetected: tripStart("Looks like you're on the move. I'll keep an eye on the trip and check in if something seems unusual."),
+  /** Night movement detected. */
+  nightOut: tripStart("Looks like you're heading out. I'll keep an eye on the trip and check in if something seems unusual."),
   nightOutUnfamiliar: tripStart(
-    "hey, saw that you were out. it's getting late, i'll walk you home. this isn't an area you've been much; i'll check in if anything looks off.",
+    "Looks like you're heading through an area you don't usually visit. I'll keep an eye on the trip and check in if something seems unusual.",
   ),
-  softRejoin: "hey, i'm back with you on this trip. i'll only text if something looks off. text stop anytime.",
+  /** Open walk resumed after a server restart. */
+  softRejoin: "Picking this trip back up. I'll check in if something seems unusual.",
   unfamiliarArea:
-    "noticed you started walking but this isn't an area you've been. i'll check in with you in a bit. text 'stop' if you're all set",
-  dismissed: "got it, i'll stop asking. text walk me home anytime",
-  dismissedIdle: "okay, i'm not watching right now. text walk me home when you want me",
+    "Looks like you're heading through an area you don't usually visit. I'll check in if something seems unusual.",
+  dismissed: "Okay, I'll stop checking in on this trip. Text 'walk me home' anytime.",
+  dismissedIdle: "Okay, I'm not watching right now. Text 'walk me home' when you want me to.",
 
   confirmMonitoring: (mode: MonitoringMode) =>
-    `change monitoring to ${monitoringLabel[mode]}? reply yes to confirm.`,
+    `Change monitoring to ${monitoringLabel[mode]}? Reply yes to confirm.`,
   confirmContact: (c: TrustedContact) =>
-    `make ${contactLabel(c)} your trusted contact? reply yes to confirm.`,
+    `Make ${contactLabel(c)} your trusted contact? Reply yes to confirm.`,
   confirmEscalation: (action: NoResponseAction, c?: TrustedContact) =>
-    `if i can't confirm you're okay after a check-in, ${escalationPlan(action, c)}. save this? reply yes to confirm.`,
+    `If I check in and don't hear back, ${escalationPlan(action, c)}. Save this? Reply yes to confirm.`,
 
   askNudgeAfter: (current: number) =>
-    `if you don't answer a check-in, how many seconds should i wait before nudging you? (30-600, now ${current}s. say 'same' to keep it.)`,
+    `If you don't answer a check-in, how many seconds should I wait before following up? (30-600, now ${current}s. Say 'same' to keep it.)`,
   askEscalateAfter: (current: number) =>
-    `after the nudge, how many seconds before i take the next step? (30-600, now ${current}s. say 'same' to keep it.)`,
+    `After the follow-up, how many seconds before I take the next step? (30-600, now ${current}s. Say 'same' to keep it.)`,
   askNoUpdate: (current: number) =>
-    `if your location stops updating while i'm watching, how many minutes before i check in? (2-15, now ${current} min. say 'same' to keep it.)`,
-  badTiming: (min: number, max: number, unit: string) => `send a number from ${min} to ${max} ${unit}.`,
+    `If your location stops updating while I'm watching, how many minutes before I check in? (2-15, now ${current} min. Say 'same' to keep it.)`,
+  badTiming: (min: number, max: number, unit: string) => `Send a number from ${min} to ${max} ${unit}.`,
   confirmTimeouts: (t: Required<CheckinTimeouts>) =>
-    `save these timings? ${timingSummary(t)}. reply yes to confirm.`,
-  changeSaved: "done, your settings are updated.",
-  changeCancelled: "okay, i didn't change anything.",
+    `Save these timings? ${capitalize(timingSummary(t))}. Reply yes to confirm.`,
+  changeSaved: "Done. Your settings are updated.",
+  changeCancelled: "Okay, I didn't change anything.",
 
   settings(user: UserRecord): string {
     const c = user.trustedContact;
     const lines = [
-      "nook settings",
-      `name: ${user.displayName ?? "not set"}`,
-      `monitoring: ${user.monitoringMode ? monitoringLabel[user.monitoringMode] : "not set"}`,
-      `trusted contact: ${c ? contactLabel(c) : "not set"}`,
-      `if something seems unusual: ${
-        user.escalation ? escalationSummary(user.escalation.onNoTextResponse, c) : "not set"
-      }`,
-      `check-in timing: ${timingSummary(resolveTimeouts(user.timeouts))}`,
-      `home: ${user.homeLat !== undefined ? "saved" : "not saved yet (text 'home' when you're there)"}`,
+      "Nook settings",
+      `Name: ${user.displayName ?? "not set"}`,
+      `Monitoring: ${user.monitoringMode ? monitoringLabel[user.monitoringMode] : "not set"}`,
+      `Trusted contact: ${c ? contactLabel(c) : "not set"}`,
+      `If I don't hear back: ${user.escalation ? escalationSummary(user.escalation.onNoTextResponse, c) : "not set"}`,
+      `Check-in timing: ${timingSummary(resolveTimeouts(user.timeouts))}`,
+      `Home: ${user.homeLat !== undefined ? "saved" : "not saved yet (text 'home' when you're there)"}`,
       "",
-      "you can say things like:",
+      "You can say things like:",
       "- 'change my name'",
-      "- 'only monitor when i start a trip'",
+      "- 'only monitor when I start a trip'",
       "- 'change my trusted contact'",
-      "- 'don't contact anyone if i miss a check-in'",
+      "- 'don't contact anyone if I miss a check-in'",
       "- 'change my check-in timing'",
       "- 'what have you learned about me?'",
     ];
     return lines.join("\n");
   },
 };
+
+/** "home" → "home"; "Joe's Pizza" → "to Joe's Pizza". */
+function toDestination(dest: string): string {
+  return dest === "home" ? "home" : `to ${dest}`;
+}
+
+function capitalize(s: string): string {
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}
+
+function withPeriod(s: string): string {
+  const t = capitalize(s.trim());
+  return /[.!?]$/.test(t) ? t : `${t}.`;
+}

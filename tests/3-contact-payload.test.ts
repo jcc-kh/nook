@@ -24,16 +24,16 @@ describe("emergency alert text", () => {
     const t = buildEmergencyAlert({ ...base, trip: { minutesWalking: 12, destination: "home", onRoute: true } });
     expect(t).toContain("Alex (+1 555-555-0199)");
     expect(t).toContain("immediate danger");
-    expect(t).toContain("confirmed: 10:30 pm, by text");
-    expect(t).toContain("location: Amsterdam Ave");
-    expect(t).toContain("coordinates: 40.80275, -73.96394");
+    expect(t).toContain("Confirmed: 10:30 pm, by text");
+    expect(t).toContain("Location: Amsterdam Ave");
+    expect(t).toContain("Coordinates: 40.80275, -73.96394");
     expect(t).toContain("20 sec before this alert");
-    expect(t).toContain('what they said: "someone is following me"');
-    expect(t).toContain("nook's response: told them to call 911 now");
+    expect(t).toContain('What they said: "someone is following me"');
+    expect(t).toContain("Nook's response: told them to call 911 now");
     expect(t).toContain("walking 12 min");
     expect(t).toContain("heading to home");
     expect(t).toContain("https://maps.apple.com/?ll=40.80275,-73.96394");
-    expect(t).toContain("please call Alex now");
+    expect(t).toContain("Please call Alex now");
   });
 
   test("no location is stated plainly, not faked", () => {
@@ -64,7 +64,7 @@ describe("emergency alert text", () => {
 
   test("routine alerts identify Nook and the user", () => {
     const t = contactAlert("quiet", "Alex (+1 555-555-0199)");
-    expect(t).toContain("this is nook");
+    expect(t).toContain("Hi, this is Nook.");
     expect(t).toContain("Alex (+1 555-555-0199)");
   });
 });

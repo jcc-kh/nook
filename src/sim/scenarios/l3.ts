@@ -155,7 +155,7 @@ async function main() {
     lon: DEMO_ORIGIN.lon + 0.01,
   });
   assert(
-    a6.some((a) => a.type === "SendText" && a.text.includes("usual way")),
+    a6.some((a) => a.type === "SendText" && a.text.includes("different way than usual")),
     "R6: expected off-route checkin (run seed:history first)",
   );
   console.log("R6 ok");

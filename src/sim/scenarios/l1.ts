@@ -209,7 +209,7 @@ async function main() {
       (a: Action) =>
         a.type === "SendText" &&
         a.tag === "started" &&
-        /back with you on this trip/i.test(a.text),
+        /Picking this trip back up/.test(a.text),
     ),
     "R3 soft-rejoin: expected softRejoin, not worried check-in",
   );

@@ -182,7 +182,7 @@ async function runPass(label: string, useGemini: boolean) {
     "staying at Sam's tonight",
     "asdfgh",
   ]) {
-    const parsed = await llm.classify(sample);
+    const parsed = await llm.classify(sample, { safetyState: "safe", awaiting: null, recent: [] });
     console.log(`  text: "${sample}" →`, parsed);
   }
 }

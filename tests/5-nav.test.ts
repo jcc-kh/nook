@@ -127,7 +127,7 @@ describe("engine: uneasy → busier / destination", () => {
     await h.react("👎");
     const out = await h.text("keep going");
     expect(h.rt().routeChoice).toBe("destination");
-    expect(allText(out)).toContain("keep heading to home");
+    expect(allText(out)).toContain("Keep heading home");
   });
 
   test("shared Apple Maps place becomes the trip destination", async () => {
@@ -142,7 +142,7 @@ describe("engine: uneasy → busier / destination", () => {
     const h = harness();
     await h.startWalk();
     const out = await h.text("https://maps.apple/p/abc123");
-    expect(allText(out)).toContain("couldn't read that link");
+    expect(allText(out)).toContain("couldn't open that link");
   });
 
   test("voice tools: safe destinations → set destination → navigation", async () => {

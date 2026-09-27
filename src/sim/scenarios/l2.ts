@@ -192,8 +192,8 @@ async function main() {
     clock.advance(60_000);
     const final = await brain.tick(clock.now());
     assert(
-      final.some((a) => a.type === "SendText" && a.text.includes("still nothing")),
-      "NONE: final nudge",
+      !final.some((a) => a.type === "SendText" && a.tag === "nudge"),
+      "NONE: no second, more urgent nudge",
     );
     assert(
       !final.some((a) => a.type === "AlertContact" || a.type === "StartCall"),
@@ -201,8 +201,14 @@ async function main() {
     );
     clock.advance(5 * 60_000);
     const after = await brain.tick(clock.now());
-    assert(after.length === 0, "NONE: silent after the final nudge");
-    console.log("R10 NONE floor ok");
+    assert(after.length === 0, "NONE: quiet until the slower re-check");
+    clock.advance(5 * 60_000 + 1_000);
+    const recheck = await brain.tick(clock.now());
+    assert(
+      recheck.some((a) => a.type === "SendText" && a.text.startsWith("Checking in again.")),
+      "NONE: plain re-check later",
+    );
+    console.log("R10 NONE keep-checking-in ok");
   }
 
   // R10 policy: CONTACT_TRUSTED with custom 30 s / 30 s timeouts. Silence never places a call.

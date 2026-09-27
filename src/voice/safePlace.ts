@@ -1,9 +1,9 @@
 import { bearingDeg, distanceM } from "../shared/geo.ts";
 
 /**
- * Demo destination. Morton Williams at 2941 Broadway (115th St), the pin from
- * the store's Google Maps place. Open 24 hours. Distance and the turn come
- * from the live fix; the place itself is not looked up.
+ * One real store, written down for the demo. Morton Williams at 2941 Broadway
+ * (115th St) is open 24 hours. Distance and the turn are computed from the
+ * live fix; the place itself is not looked up. Used only when GEOAPIFY_API_KEY is unset.
  */
 export const SAFE_PLACE = {
   name: "Morton Williams",

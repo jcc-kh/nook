@@ -86,6 +86,8 @@ export interface UserReaction {
   userId: string;
   emoji: string; // e.g. 👍 👎 ‼️ ❓
   targetMessageId: string;
+  /** Id of the reaction message itself, for idempotency. */
+  messageId?: string;
   time: Date;
 }
 
@@ -142,16 +144,47 @@ export type InputSource = "reaction" | "text" | "voice_note" | "voice_call";
 /**
  * What the user meant, whatever the input method. 👍 👎 ❓ ‼️ map to
  * safe / uneasy / call / danger(clear); text and voice-note transcripts are
- * classified into the same shape.
+ * classified into the same shape. Input modality affects convenience, not
+ * safety semantics.
  */
 export type SafetyIntent =
-  | { kind: "safe"; placeLabel?: string }
+  | { kind: "safe" }
   | { kind: "uneasy"; detail?: string; wants?: RouteChoice; lost?: boolean }
-  | { kind: "call"; reason?: CallReason }
-  /** `clear: false` = ambiguous ("help"): Nook asks before treating it as an emergency. */
-  | { kind: "danger"; clear: boolean; quote?: string; wantsCall?: boolean }
+  /** `uneasy`: they asked for the call because they feel uneasy ("I'm scared, call me"). */
+  | { kind: "call"; reason?: CallReason; uneasy?: boolean }
+  /**
+   * `clear: false` = ambiguous ("help"): Nook asks before treating it as an emergency.
+   * `quote` is the user's own words, never paraphrased. `wantsCall` only picks
+   * the shorter guidance text; Nook never starts a call in immediate danger.
+   */
+  | { kind: "danger"; clear: boolean; quote: string; wantsCall?: boolean }
   | { kind: "route_choice"; choice: RouteChoice }
+  /** Where they're staying ("I'm at Sam's"). */
+  | { kind: "place"; label: string }
+  /** Stop checking in / tracking this trip. */
+  | { kind: "stop" }
   | { kind: "unclear" };
+
+export type SafetyIntentKind = SafetyIntent["kind"];
+
+/** The question Nook is waiting on, which decides what a bare "yes" / "no" means. */
+export type Awaiting = "danger_confirmation" | "route_choice" | "place_choice" | "checkin" | null;
+
+/** Concise state handed to the classifier. Never the full transcript. */
+export interface ClassifyContext {
+  safetyState: SafetyState;
+  awaiting: Awaiting;
+  destination?: string;
+  /** Last 2-4 turns, oldest first. */
+  recent: { from: "user" | "nook"; text: string }[];
+}
+
+export type ClassifierUsed = "reaction" | "context" | "deterministic" | "gemini" | "fallback";
+
+export interface Classification {
+  intent: SafetyIntent;
+  classifier: ClassifierUsed;
+}
 
 export interface Destination {
   name: string;
@@ -279,5 +312,5 @@ export interface WalkPlan {
 // --- LLM (not on ping path) ---
 
 export type WriteMessages = (plan: WalkPlan) => Promise<Record<string, string>>;
-/** Typed text or a voice-note transcript → SafetyIntent. */
-export type ClassifyInput = (text: string) => Promise<SafetyIntent>;
+/** Typed text or a voice-note transcript → SafetyIntent. Classifies only; the engine owns state. */
+export type ClassifyInput = (text: string, ctx: ClassifyContext) => Promise<Classification>;

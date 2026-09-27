@@ -8,6 +8,7 @@
     "smoke": "bun run src/smoke.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "test": "USE_GEMINI=0 bun test tests",
+    "eval:intents": "bun run src/scripts/eval-intents.ts",
     "db:migrate": "bun run src/scripts/migrate.ts",
     "seed:user": "bun run src/scripts/seed-user.ts",
     "user:reset": "bun run src/scripts/reset-user.ts",
@@ -24,13 +25,15 @@
     "sim:play": "bun run src/sim/interactive.ts",
     "sim:personal": "bun run src/sim/scenarios/personal.ts",
     "sim:live": "bun run src/scripts/sim-live.ts",
-    "events:tail": "bun run src/scripts/events-tail.ts"
+    "events:tail": "bun run src/scripts/events-tail.ts",
+    "demo": "bun run src/scripts/demo.ts"
   },
   "dependencies": {
     "@google/genai": "^1.19.0",
     "@photon-ai/advanced-imessage": "^2.2.0",
     "pg": "^8.16.3",
-    "spectrum-ts": "^12.10.1"
+    "spectrum-ts": "^12.10.1",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/bun": "latest",

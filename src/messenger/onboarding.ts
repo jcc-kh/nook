@@ -448,7 +448,7 @@ export function createInboundRouter(deps: RouterDeps) {
         console.error(`[onboarding] voice note ingest failed for ${user.userId}`, err);
       }
     }
-    log(user, `voice note ${msg.messageId}: ${voiceNote?.transcribed ? JSON.stringify(text) : "(no transcript)"}`);
+    log(user, `voice note ${msg.messageId}: ${voiceNote?.transcribed ? `transcript ${text.length} chars` : "(no transcript)"}`);
     await dispatch({
       type: "UserText",
       userId: user.userId,
@@ -476,6 +476,7 @@ export function createInboundRouter(deps: RouterDeps) {
         userId: uid,
         emoji: msg.emoji,
         targetMessageId: msg.targetMessageId,
+        ...(msg.messageId && { messageId: msg.messageId }),
         time: clock.now(),
       });
       return;
@@ -493,5 +494,10 @@ export function createInboundRouter(deps: RouterDeps) {
     if (user) await continueOnboarding(user, copy.locationConnected);
   }
 
-  return { route, onFix };
+  /** Drop any half-answered question (demo setup finishes onboarding directly in the DB). */
+  function forget(userId: string): void {
+    pending.delete(userId);
+  }
+
+  return { route, onFix, forget };
 }

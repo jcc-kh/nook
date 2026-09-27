@@ -1,5 +1,6 @@
 import { SystemClock } from "./shared/clock.ts";
-import { createBrain } from "./brain/index.ts";
+import { createBrain, type DemoHooks } from "./brain/index.ts";
+import { createDemo, DEMO_STEPS, type DemoStep } from "./demo/scenes.ts";
 import { createEchoBrain } from "./brain/stubEcho.ts";
 import { createLocations } from "./locations/index.ts";
 import { copy } from "./messenger/copy.ts";
@@ -27,6 +28,8 @@ const clock = new SystemClock();
 const users = createUserStore();
 
 let brain: Brain;
+let demoHooks: DemoHooks | undefined;
+let getPhase: ((userId: string) => string) | undefined;
 if (brainMode === "echo") {
   brain = createEchoBrain();
 } else if (brainMode === "stub") {
@@ -37,11 +40,14 @@ if (brainMode === "echo") {
     throw new Error("BRAIN_MODE=live needs DATABASE_URL (Tiger). Use BRAIN_MODE=echo to test without a database.");
   }
   // Same store as onboarding so the brain sees trustedContact / escalation / monitoringMode.
-  brain = createBrain({
+  const live = createBrain({
     clock,
     getUser: (userId) => users.getById(userId),
     verbose: process.env.BRAIN_LOG !== "0",
   });
+  brain = live;
+  demoHooks = live.demo;
+  getPhase = live.getPhase;
 }
 
 const voice = voiceConfigFromEnv();
@@ -133,8 +139,10 @@ async function feedPing(ping: LocationPing): Promise<void> {
 const devSim = process.env.DEV_SIM === "1";
 const sim = createLiveSim({ now: () => clock.now(), feed: feedPing, dispatch });
 
+let demo: ReturnType<typeof createDemo> | undefined;
+
 async function onPing(ping: LocationPing): Promise<void> {
-  if (sim.isActive(ping.userId)) return;
+  if (sim.isActive(ping.userId) || demo?.holds(ping.userId)) return;
   await feedPing(ping);
 }
 
@@ -181,6 +189,27 @@ async function handleDevSim(req: Request, url: URL): Promise<Response> {
     body.walk === undefined ? {} : { startWalk: body.walk },
   );
   return Response.json({ ok: true, userId: user.userId, ...started });
+}
+
+/** POST /dev/demo/<step> {handle, other?}: one deterministic demo-recording scene (src/demo/scenes.ts). */
+async function handleDevDemo(req: Request, url: URL): Promise<Response> {
+  if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+  if (!demo) return Response.json({ ok: false, error: "demo needs BRAIN_MODE=live" }, { status: 400 });
+  const step = url.pathname.slice("/dev/demo/".length) as DemoStep;
+  if (!DEMO_STEPS.includes(step)) {
+    return Response.json({ ok: false, error: `step must be one of: ${DEMO_STEPS.join(", ")}` }, { status: 400 });
+  }
+  const body = (await req.json().catch(() => ({}))) as { handle?: string; other?: string };
+  const lookup = async (raw: string | undefined) => (raw ? users.getByHandle(toE164(raw) ?? raw) : null);
+  const user = await lookup(body.handle);
+  if (!user) return Response.json({ ok: false, error: `no user for ${body.handle ?? "(missing handle)"}` }, { status: 404 });
+  const other = await lookup(body.other);
+  try {
+    return Response.json({ ok: true, ...(await demo.run(step, user.userId, other?.userId)) });
+  } catch (err) {
+    console.error(`[demo] ${step} failed`, err);
+    return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+  }
 }
 
 /** POST /dev/call {handle}: place a check-in call (or link) outside any walk, to test the voice path. */
@@ -342,6 +371,20 @@ const ingestVoiceNote = createVoiceNoteIngest({ transcribe: transcriber, persist
 router = createInboundRouter({ messenger, locations, users, clock, dispatch, ingestVoiceNote });
 const { route } = router;
 
+if (devSim && demoHooks && getPhase && brain.tick && brain.resetUser) {
+  const { tick, resetUser } = brain;
+  const inbound = router;
+  demo = createDemo({
+    hooks: demoHooks,
+    dispatch,
+    tick,
+    runActions,
+    forgetOnboarding: inbound.forget,
+    resetOther: resetUser,
+    getPhase,
+  });
+}
+
 const TICK_MS = 30_000;
 let ticking = false;
 const ticker = setInterval(async () => {
@@ -376,6 +419,7 @@ const server = Bun.serve<BridgeSocket["data"], never>({
       }
       if (url.pathname === "/dev/call") return handleDevCall(req);
       if (url.pathname.startsWith("/dev/sim")) return handleDevSim(req, url);
+      if (url.pathname.startsWith("/dev/demo/")) return handleDevDemo(req, url);
     }
     if (url.pathname.startsWith("/tools/")) return handleTool(req, url);
     if (talkLinks && url.pathname.startsWith("/talk/")) return talkLinks.handle(req, url);

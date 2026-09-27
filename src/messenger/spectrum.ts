@@ -25,7 +25,7 @@ interface InboundBase {
 export type Inbound =
   /** `threadTargetId`: set when the user replied inside a thread (to that message). */
   | (InboundBase & { kind: "text"; messageId: string; text: string; threadTargetId?: string })
-  | (InboundBase & { kind: "reaction"; emoji: string; targetMessageId: string })
+  | (InboundBase & { kind: "reaction"; messageId?: string; emoji: string; targetMessageId: string })
   | (InboundBase & {
       kind: "voice";
       messageId: string;
@@ -151,7 +151,7 @@ export async function createSpectrumMessenger(
   /** Inbound message ids already handled. Stream reconnects can redeliver the same one. */
   const seenInbound = new Set<string>();
   const recentInbound = new Map<string, number>();
-  const INBOUND_DEDUP_MS = 60_000;
+  const INBOUND_DEDUP_MS = 8_000;
 
   async function openDm(handle: string): Promise<Space | undefined> {
     if (!imApp) return undefined;
@@ -360,7 +360,7 @@ export async function createSpectrumMessenger(
       const base: InboundBase = { user, isNewUser: !existing, chatId: space.id };
       const content = message.content;
       if (content.type === "reaction") {
-        yield { ...base, kind: "reaction", emoji: content.emoji, targetMessageId: content.target.id };
+        yield { ...base, kind: "reaction", messageId: message.id, emoji: content.emoji, targetMessageId: content.target.id };
         continue;
       }
       const audio = audioOf(content);

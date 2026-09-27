@@ -3,12 +3,12 @@
  * alert even with escalation NONE, no repeat alerts, "okay now" follow-up.
  */
 import { describe, expect, test } from "bun:test";
-import { classifyFallback, guardIntent } from "../src/llm/classify.ts";
+import { classifyLocal, guardIntent } from "../src/llm/classify.ts";
 import type { SafetyIntent } from "../src/shared/types.ts";
 import { alerts, allText, calls, harness } from "./helpers.ts";
 
 describe("classifier", () => {
-  const kind = (t: string) => classifyFallback(t);
+  const kind = (t: string) => classifyLocal(t).intent;
 
   test.each([
     "someone is chasing me",
@@ -39,16 +39,26 @@ describe("classifier", () => {
   });
 
   test("Gemini can't raise clear danger on its own", () => {
-    const regex: SafetyIntent = { kind: "unclear" };
-    const out = guardIntent(regex, { kind: "danger", clear: true });
+    const conservative: SafetyIntent = { kind: "unclear" };
+    const out = guardIntent(conservative, { kind: "danger", clear: true, quote: "x" });
     expect(out).toMatchObject({ kind: "danger", clear: false });
   });
 
-  test("Gemini can't erase a regex danger signal", () => {
-    const regex: SafetyIntent = { kind: "danger", clear: true, quote: "he has a knife" };
-    expect(guardIntent(regex, { kind: "safe" })).toMatchObject({ kind: "danger", clear: true });
-    const ambiguous: SafetyIntent = { kind: "danger", clear: false };
+  test("Gemini can't erase an ambiguous danger signal", () => {
+    const ambiguous: SafetyIntent = { kind: "danger", clear: false, quote: "someone is following me" };
     expect(guardIntent(ambiguous, { kind: "safe" })).toMatchObject({ kind: "danger", clear: false });
+    expect(guardIntent(ambiguous, { kind: "unclear" })).toMatchObject({ kind: "danger", clear: false });
+    expect(guardIntent(ambiguous, { kind: "uneasy" })).toMatchObject({ kind: "danger", clear: false });
+    expect(guardIntent(ambiguous, { kind: "danger", clear: true, quote: "x" })).toMatchObject({
+      kind: "danger",
+      clear: false,
+      quote: "someone is following me",
+    });
+  });
+
+  test("Gemini can't turn unease into safe", () => {
+    const uneasy: SafetyIntent = { kind: "uneasy", detail: "i'm not okay" };
+    expect(guardIntent(uneasy, { kind: "safe" }).kind).toBe("uneasy");
   });
 });
 
@@ -81,7 +91,7 @@ describe("engine danger flow", () => {
     await h.startWalk();
     await h.text("help");
     const out = await h.react("‼️");
-    expect(alerts(out)[0]?.text).toContain("tapped ‼️ when nook asked");
+    expect(alerts(out)[0]?.text).toContain("tapped ‼️ when Nook asked");
   });
 
   test("escalation NONE still alerts the trusted contact in immediate danger", async () => {
@@ -106,7 +116,7 @@ describe("engine danger flow", () => {
     await h.react("‼️");
     const again = await h.text("someone is chasing me");
     expect(alerts(again)).toHaveLength(0);
-    expect(allText(again)).toContain("still here");
+    expect(allText(again)).toContain("If you haven't already, call 911 now");
   });
 
   test("danger with no open walk still alerts (starts a trip)", async () => {

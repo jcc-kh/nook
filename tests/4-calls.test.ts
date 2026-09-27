@@ -46,7 +46,7 @@ describe("calls never escalate", () => {
     expect(h.phase()).toBe("CALLING");
     const out = await h.call("ended_unresolved");
     expect(alerts(out)).toHaveLength(0);
-    expect(allText(out)).toContain("you okay?");
+    expect(allText(out)).toContain("Everything okay?");
     expect(h.phase()).not.toBe("CALLING");
     // ...and ignoring that check-in follows the normal text path, still no call.
     const later: Action[] = [];
@@ -91,7 +91,7 @@ describe("calls never escalate", () => {
     await h.startWalk();
     const out = await h.text("call me");
     expect(calls(out)).toHaveLength(0);
-    expect(allText(out)).toContain("can't place calls");
+    expect(allText(out)).toContain("can't place a call");
     expect(h.phase()).not.toBe("CALLING");
   });
 
@@ -103,7 +103,7 @@ describe("calls never escalate", () => {
     expect(start?.vars.callReason).toBe("uneasy_companion");
     expect(start?.vars.safetyState).toBe("uneasy");
     expect(start?.vars.recentContext).toContain("i feel uneasy");
-    expect(start?.vars.openingLine).toContain("somewhere busier");
+    expect(start?.vars.openingLine).toContain("somewhere with more people around");
     expect(start?.vars.lat).toBeCloseTo(START.lat, 4);
   });
 });
