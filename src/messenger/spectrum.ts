@@ -92,6 +92,9 @@ export async function createSpectrumMessenger(
   const lastIdByTag = new Map<string, Map<SendTextTag, string>>();
   /** The user's in-thread message currently being handled; our replies go into that thread. */
   const threads = new Map<string, Message>();
+  /** Drop identical back-to-back sends (Spectrum / reconnect weirdness). */
+  const recentSend = new Map<string, { text: string; at: number }>();
+  const SEND_DEDUP_MS = 8_000;
 
   async function openDm(handle: string): Promise<Space | undefined> {
     if (!imApp) return undefined;
@@ -110,6 +113,14 @@ export async function createSpectrumMessenger(
   }
 
   async function sendToUser(userId: string, text: string): Promise<ExecuteResult> {
+    const prev = recentSend.get(userId);
+    const now = Date.now();
+    if (prev && prev.text === text && now - prev.at < SEND_DEDUP_MS) {
+      console.log(`[messenger] dedup skip identical → ${userId}`);
+      return {};
+    }
+    recentSend.set(userId, { text, at: now });
+
     const space = await spaceForUser(userId);
     if (!space) {
       console.warn(`[messenger] no space for ${userId}; dropping: ${text}`);
@@ -119,13 +130,15 @@ export async function createSpectrumMessenger(
     if (thread) {
       try {
         const sent = await space.send(reply(text, thread));
-        if (sent) return { messageId: sent.id };
+        // Spectrum sometimes returns no id even though the threaded send landed —
+        // never fall through to a second main-chat send or the user gets doubles.
+        return sent?.id ? { messageId: sent.id } : {};
       } catch (err) {
         console.warn(`[messenger] threaded reply to ${userId} failed; sending in the main chat`, err);
       }
     }
     const sent = await space.send(text);
-    return sent ? { messageId: sent.id } : {};
+    return sent?.id ? { messageId: sent.id } : {};
   }
 
   async function alertContact(userId: string, text: string, lat: number, lon: number) {
@@ -151,6 +164,7 @@ export async function createSpectrumMessenger(
       console.error(
         `[messenger] could NOT alert trusted contact ${contact.phone}: ${err instanceof Error ? err.message : err}`,
       );
+      // sendToUser already dedups identical text; one notify per failed alert.
       await sendToUser(userId, copy.contactUnreachable(contact.name)).catch(() => {});
     }
   }
@@ -172,7 +186,14 @@ export async function createSpectrumMessenger(
       case "StartCall": {
         const user = await users.getById(action.userId);
         if (!user) throw new Error(`StartCall for unknown user ${action.userId}`);
-        if (!voice) throw new Error("calls not configured (ELEVENLABS_API_KEY / _AGENT_ID / _AGENT_PHONE_NUMBER_ID)");
+        if (!voice) {
+          // Don't throw — help flows also AlertContact; failing here used to
+          // fire callFailed + ended_unresolved on top of the contact path.
+          console.warn(
+            `[messenger] StartCall skipped for ${user.handle} (walk ${action.walkId}): calls not configured`,
+          );
+          return {};
+        }
         const conversationId = await placeCall(voice, user.handle, action);
         console.log(`[messenger] calling ${user.handle} (walk ${action.walkId}, conversation ${conversationId ?? "?"})`);
         return {};

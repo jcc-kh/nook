@@ -44,6 +44,7 @@ import {
   upsertPlaceLabel,
 } from "../store/walks.ts";
 import { copy } from "../messenger/copy.ts";
+import { voiceConfigFromEnv } from "../voice/index.ts";
 
 const WINDOW_MS = 5 * 60_000;
 const PROMPT_COOLDOWN_MS = 2 * 60 * 60_000;
@@ -139,6 +140,12 @@ interface UserRuntime {
    * A 👍 / ok reply also cancels it.
    */
   contactAfterCall: { at: Date; rule: "R10" | "R11"; kind: ContactAlertKind } | null;
+  /**
+   * Open walk was resumed past its late window (e.g. server restart).
+   * Next tick/ping sends a soft "i'll walk you home" and resets the late clock
+   * instead of firing a worried R7 check-in.
+   */
+  softRejoinPending: boolean;
   pendingActions: Action[];
 }
 
@@ -175,6 +182,7 @@ function emptyRuntime(): UserRuntime {
     knownStopCell: null,
     friendSince: null,
     contactAfterCall: null,
+    softRejoinPending: false,
     pendingActions: [],
   };
 }
@@ -190,6 +198,21 @@ function isGreeting(text: string): boolean {
 function isAffirmativeText(text: string): boolean {
   return /^(ok|okay|fine|good|i'?m (good|fine|ok|okay)|all good|yes)([!.?\s]*)$/i.test(
     text.trim(),
+  );
+}
+
+/** User wants Nook to stop watching / stop check-ins for this trip. */
+function isDismissText(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (
+    /^(stop|dismiss|enough|cancel|never ?mind|leave me alone|go away|not tonight)([!.?\s]*)$/i.test(
+      t,
+    )
+  ) {
+    return true;
+  }
+  return /\b(stop (checking|watching|texting|asking|bugging|hovering|tracking)|don'?t (need|want) (you|nook)|you can (stop|go|stand down)|end (the )?(walk|trip)|wrap(ping)? up|i'?m (good|fine|ok|okay|safe).{0,20}\bstop\b)\b/i.test(
+    t,
   );
 }
 
@@ -565,6 +588,7 @@ async function endWalk(
   rt.awayPings = 0;
   rt.stationaryAckedAt = null;
   rt.contactAfterCall = null;
+  rt.softRejoinPending = false;
 }
 
 interface UsualCells {
@@ -637,7 +661,27 @@ export function createBrainEngine(deps: BrainDeps) {
           stops: [],
         };
       }
-      brainLog(deps, `resumed ${open.walkId} (${rt.phase}) for ${userId}`);
+
+      // Already past the late window (common after a restart mid-trip): soft-rejoin
+      // instead of immediately firing "Still out? Getting worried".
+      const lateMin = open.lateMin ?? 30;
+      const elapsedMin = (now.getTime() - open.startedAt.getTime()) / 60_000;
+      if (rt.phase !== "IDLE" && elapsedMin > lateMin) {
+        rt.phase = "WALKING";
+        rt.walkStartedAt = now;
+        rt.checkinOpenedAt = null;
+        rt.checkinKind = null;
+        rt.nudged = false;
+        rt.escalated = false;
+        rt.softRejoinPending = true;
+        rt.suppressCheckinUntil = new Date(now.getTime() + CHECKIN_SNOOZE_MS);
+        brainLog(
+          deps,
+          `soft-rejoin ${open.walkId} for ${userId} (was ${elapsedMin.toFixed(0)}m / late=${lateMin}m)`,
+        );
+      } else {
+        brainLog(deps, `resumed ${open.walkId} (${rt.phase}) for ${userId}`);
+      }
     } catch (err) {
       console.warn("[brain] hydrate failed", err);
     }
@@ -797,6 +841,14 @@ export function createBrainEngine(deps: BrainDeps) {
   async function evaluateTimers(rt: UserRuntime, user: UserRecord, now: Date) {
     const timeouts = resolveTimeouts(user.timeouts);
 
+    // Soft rejoin after resuming an overdue walk (server restart mid-trip).
+    if (rt.softRejoinPending && rt.walkId) {
+      rt.softRejoinPending = false;
+      send(rt, user.userId, "started", copy.nightOut);
+      brainLog(deps, "soft-rejoin → nightOut (tracking, no check-in)");
+      await logRule(deps, user.userId, "R7a", rt.walkId, { step: "soft_rejoin" });
+    }
+
     // R3 timeout: PROMPTED + 10 min
     if (rt.phase === "PROMPTED" && rt.lastPromptAt) {
       if (now.getTime() - rt.lastPromptAt.getTime() >= PROMPT_TIMEOUT_MS) {
@@ -918,8 +970,8 @@ export function createBrainEngine(deps: BrainDeps) {
           now,
           "checkin",
           rt.copy?.checkin
-            ? `${rt.copy.checkin} (still out — getting worried)`
-            : "Still out? Getting worried — tap 👍.",
+            ? `${rt.copy.checkin} (still out, getting worried)`
+            : "still out? getting worried. tap 👍.",
         );
         await logRule(deps, user.userId, "R7b", rt.walkId, { elapsedMin });
       } else if (elapsedMin > rt.plan.lateMin && canCheckin(rt, now)) {
@@ -1070,30 +1122,24 @@ export function createBrainEngine(deps: BrainDeps) {
             !!usual?.enabled &&
             !usual.cells.has(cell) &&
             nearestUsualM(usual, last) > OFF_ROUTE_M;
-          if (unfamiliar) {
-            await beginWalk(deps, rt, user, now, "night_unfamiliar", last.lat, last.lon);
-            send(rt, user.userId, "started", templates.started);
-            send(rt, user.userId, "checkin", copy.unfamiliarArea);
-            brainLog(
-              deps,
-              `R2 unfamiliar → beginWalk cell=${cell} usual=${usual!.cells.size}`,
-            );
-            await logRule(deps, user.userId, "R2", rt.walkId, {
-              speed: spd,
-              moved,
-              distHome,
-              unfamiliar: true,
-            });
-          } else {
-            send(rt, user.userId, "prompt");
-            rt.phase = "PROMPTED";
-            rt.lastPromptAt = now;
-            await logRule(deps, user.userId, "R2", null, {
-              speed: spd,
-              moved,
-              distHome,
-            });
-          }
+          await beginWalk(deps, rt, user, now, unfamiliar ? "night_unfamiliar" : "night", last.lat, last.lon);
+          send(
+            rt,
+            user.userId,
+            "started",
+            unfamiliar ? copy.nightOutUnfamiliar : copy.nightOut,
+          );
+          brainLog(
+            deps,
+            `R2 night → beginWalk cell=${cell} unfamiliar=${unfamiliar} usual=${usual?.cells.size ?? 0}`,
+          );
+          await logRule(deps, user.userId, "R2", rt.walkId, {
+            speed: spd,
+            moved,
+            distHome,
+            unfamiliar,
+            autoStart: true,
+          });
         }
       }
     }
@@ -1164,6 +1210,31 @@ export function createBrainEngine(deps: BrainDeps) {
         startCall(rt, user.userId, rt.walkId!, callVars(rt, user, now));
         await logRule(deps, user.userId, "R11", rt.walkId, { via: "text" });
         await persistPhase(deps, rt);
+        return rt.pendingActions;
+      }
+
+      // Dismiss: stop watching / stop check-ins for this trip
+      if (isDismissText(raw)) {
+        brainLog(deps, "intent=dismiss");
+        const hadTrip =
+          rt.walkId != null ||
+          rt.phase === "PROMPTED" ||
+          rt.phase === "CHECKING_IN" ||
+          rt.phase === "CALLING" ||
+          rt.phase === "ALERTED";
+        const walkId = rt.walkId;
+        rt.contactAfterCall = null;
+        if (rt.walkId) await endWalk(deps, rt, "ENDED_ELSEWHERE", now);
+        else {
+          rt.phase = "IDLE";
+          rt.checkinOpenedAt = null;
+          rt.checkinKind = null;
+          rt.nudged = false;
+          rt.escalated = false;
+        }
+        rt.cooldownUntil = new Date(now.getTime() + PROMPT_COOLDOWN_MS);
+        send(rt, user.userId, "ended", hadTrip ? copy.dismissed : copy.dismissedIdle);
+        await logRule(deps, user.userId, "R3", walkId, { reply: "dismiss" });
         return rt.pendingActions;
       }
 
@@ -1262,7 +1333,14 @@ export function createBrainEngine(deps: BrainDeps) {
         }
         rt.phase = "CALLING";
         rt.contactAfterCall = null;
-        startCall(rt, user.userId, rt.walkId!, callVars(rt, user, now));
+        // Help always texts the trusted contact. Only place a call when voice is configured —
+        // otherwise StartCall used to fail and stack callFailed + a second contact attempt.
+        if (voiceConfigFromEnv()) {
+          startCall(rt, user.userId, rt.walkId!, callVars(rt, user, now));
+        } else {
+          rt.phase = "ALERTED";
+          brainLog(deps, "help: calls off → contact only");
+        }
         alert(
           rt,
           user.userId,
@@ -1362,8 +1440,24 @@ export function createBrainEngine(deps: BrainDeps) {
         } else {
           rt.phase = "IDLE";
           rt.cooldownUntil = new Date(now.getTime() + PROMPT_COOLDOWN_MS);
+          send(rt, user.userId, "ended", copy.dismissed);
           await logRule(deps, user.userId, "R3", null, { reply: "dislike" });
         }
+        return rt.pendingActions;
+      }
+      // 👎 on a check-in = dismiss the whole trip (stop asking)
+      if (
+        (rt.phase === "CHECKING_IN" || rt.phase === "ALERTED" || awaitingCallReply(rt)) &&
+        event.emoji === "👎"
+      ) {
+        brainLog(deps, "intent=dismiss (👎)");
+        rt.contactAfterCall = null;
+        if (rt.walkId) await endWalk(deps, rt, "ENDED_ELSEWHERE", now);
+        else rt.phase = "IDLE";
+        rt.cooldownUntil = new Date(now.getTime() + PROMPT_COOLDOWN_MS);
+        send(rt, user.userId, "ended", copy.dismissed);
+        await logRule(deps, user.userId, "R9a", null, { reply: "dismiss" });
+        await persistPhase(deps, rt);
         return rt.pendingActions;
       }
       // R9a

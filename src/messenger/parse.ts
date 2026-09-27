@@ -9,13 +9,13 @@ const LEARNED_RE = /\b(what (have|did) you learn(ed)?|learned about me|what do y
 const CANCEL_RE = /^\s*(cancel|never ?mind|forget it|stop)\b/i;
 const PHONE_RE = /\+?\d[\d\s().-]{5,}\d/;
 
-/** NANP: area code and exchange both start 2–9 (so 000-, 1xx- and 911-style strings fail). */
+/** NANP: area code and exchange both start 2-9 (so 000-, 1xx- and 911-style strings fail). */
 const NANP_RE = /^[2-9]\d{2}[2-9]\d{6}$/;
 
 /**
  * US-default E.164 normalization; null when it can't be a real phone number.
  * `+1…` and bare 10/11-digit numbers must be valid NANP; other `+` numbers
- * need 8–15 digits (E.164 maximum).
+ * need 8-15 digits (E.164 maximum).
  */
 export function toE164(raw: string): string | null {
   const digits = raw.replace(/\D/g, "");
@@ -32,7 +32,7 @@ export function toE164(raw: string): string | null {
 function normalize(text: string): string {
   return text
     .toLowerCase()
-    .replace(/[‘’]/g, "'")
+    .replace(/[\u2018\u2019]/g, "'")
     .replace(/[^a-z0-9' -]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -40,7 +40,7 @@ function normalize(text: string): string {
 
 function cleanName(raw: string): string | undefined {
   const name = raw
-    .replace(/[,:;()"“”]/g, " ")
+    .replace(/[,:;()"“”']/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .replace(
@@ -56,7 +56,7 @@ const NOT_A_NAME = new Set([
   "hi", "hey", "hello", "thanks", "thank you", "what", "why", "help", "not sure", "later",
 ]);
 
-/** 1–3 words of letters (any script), apostrophes, periods, hyphens; up to 40 chars. */
+/** 1-3 words of letters (any script), apostrophes, periods, hyphens; up to 40 chars. */
 function validName(name: string): string | undefined {
   if (!/^\p{L}[\p{L}\p{M}' .-]{0,39}$/u.test(name)) return undefined;
   if (name.split(/\s+/).length > 3 || NOT_A_NAME.has(name.toLowerCase())) return undefined;
@@ -68,16 +68,23 @@ export function parseName(text: string): string | undefined {
   return cleanName(text.replace(/^(their name is|name is|name's|it's|call (them|her|him))\s+/i, ""));
 }
 
-/** The user's own name ("Alex", "I'm Alex", "my name is Alex Kim"). */
+/** The user's own name ("Alex", "I'm Alex", "change my name: Jessie"). */
 export function parseOwnName(text: string): string | undefined {
-  const name = text
-    .replace(/[,:;()"“”]/g, " ")
+  // Strip the imperative first (while :/= still present), then clean punctuation.
+  let name = text.trim().replace(/^(hi|hey|hello)\s+/i, "");
+  name = name.replace(
+    /^((change|update|set|fix) (my |me )?name\s*(to|=|:|-)?|my name is|my name's|name's|i'?m|i am|it'?s|this is|call me)\s*/i,
+    "",
+  );
+  name = name
+    .replace(/[()"“”']/g, " ")
+    .replace(/[,:;]/g, " ")
     .replace(/\s+/g, " ")
-    .trim()
-    .replace(/^(hi|hey|hello)\s+/i, "")
-    .replace(/^((change|update) my name to|my name is|my name's|name's|i'?m|i am|it'?s|this is)\s+/i, "")
-    .replace(/^[\s.-]+|[\s.!-]+$/g, "");
-  if (/^(my|your|the|a|an)\b/i.test(name)) return undefined;
+    .replace(/^[\s.,:;\-=]+|[\s.!-]+$/g, "")
+    .trim();
+  if (!name) return undefined;
+  // leftover imperative ("change my name" with no new name) is not a name
+  if (/^(my|your|the|a|an|change|update|set|fix|name)\b/i.test(name)) return undefined;
   return validName(name);
 }
 
@@ -185,7 +192,7 @@ export function parseIntent(text: string): Intent | null {
   if (SETTINGS_RE.test(text)) return { kind: "settings" };
   if (LEARNED_RE.test(text)) return { kind: "learned" };
   const t = normalize(text);
-  if (/\b(change|update|fix) my name\b|^my name is\b/.test(t)) {
+  if (/\b(change|update|set|fix) (my |me )?name\b|^my name is\b|^call me\b/.test(t)) {
     const name = parseOwnName(text);
     return name ? { kind: "name", name } : { kind: "name" };
   }

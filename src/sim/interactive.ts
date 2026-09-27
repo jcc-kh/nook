@@ -212,7 +212,7 @@ async function walkStep(meters = WALK_MPS * WALK_STEP_S) {
 async function cruise(durationS = 150) {
   if (rt().phase !== "IDLE") {
     console.log(
-      `  cruise is for IDLE→prompt (R2). You're ${rt().phase}. Use step/stay/+Nm instead.`,
+      `  cruise is for IDLE→night start (R2). You're ${rt().phase}. Use step/stay/+Nm instead.`,
     );
     return;
   }

@@ -1,21 +1,21 @@
 import type { NoResponseAction } from "./settings.ts";
 import type { SendTextTag } from "./types.ts";
 
-/** Canned copy used when Gemini is absent or fails (L1–L2 default). Friend iMessage voice. */
+/** Canned copy used when Gemini is absent or fails (L1-L2 default). Friend iMessage voice. */
 export const templates = {
   prompt: "heading home? 👍",
-  started: "ok i'm with you — only texting if something looks off. text call me anytime",
-  checkin: "you good? 👍 or just text me",
-  nudge: "still there? tap 👍 so i know",
+  started: "ok i'm with you. only texting if something looks off. text stop anytime, or call me if you need me",
+  checkin: "you good? 👍 or just text me (or stop to dismiss)",
+  nudge: "still there? tap 👍 so i know, or text stop",
   arrived: "home safe 👍 night!",
-  ended: "ok wrapping up — looks like you're staying put",
-  unclear: "wait what — 👍 if you're good or just text me",
-  checkinOffRoute: "this isn't your usual way home — all good? 👍 or tell me where you're headed",
-  checkinNoUpdate: "haven't seen your location in a bit — you ok? 👍",
-  finalNudge: "still nothing — tap 👍 when you can, i won't bug anyone yet",
+  ended: "ok wrapping up, looks like you're staying put",
+  unclear: "wait what? 👍 if you're good, text stop to dismiss, or just text me",
+  checkinOffRoute: "this isn't your usual way home. all good? 👍 or tell me where you're headed (or stop)",
+  checkinNoUpdate: "haven't seen your location in a bit. you ok? 👍 or text stop",
+  finalNudge: "still nothing. tap 👍 when you can, or text stop and i'll back off",
   /** After they 👍'd a dwell check-in but are still parked away from home. */
   lingerOffer:
-    "you haven't moved for a while but you 👍'd my last one so i'm assuming you're good. if you still want me keeping tabs, 👍 this",
+    "you haven't moved for a while but you 👍'd my last one so i'm assuming you're good. 👍 if you still want me keeping tabs, or text stop",
   lingerDrop: "cool, i'll stop hovering. text walk me home anytime",
 } as const satisfies Record<string, string>;
 
@@ -28,14 +28,14 @@ export type ContactAlertKind = "quiet" | "offroute" | "help";
  * may never have heard of Nook. `who` is the user's name or number.
  */
 export function contactAlert(kind: ContactAlertKind, who: string): string {
-  const intro = `hey — ${who} has you as their get-home contact on nook.`;
+  const intro = `hey, ${who} has you as their get-home contact on nook.`;
   switch (kind) {
     case "quiet":
       return `${intro} they're out and haven't answered me. last location below.`;
     case "offroute":
       return `${intro} they went off their usual route and went quiet. last location below.`;
     case "help":
-      return `${intro} they need help — please check on them. last location below.`;
+      return `${intro} they need help, please check on them. last location below.`;
   }
 }
 

@@ -367,19 +367,40 @@ export function createInboundRouter(deps: RouterDeps) {
     if (HOME_RE.test(text)) return saveHome(user);
 
     const intent = parseIntent(text);
-    if (intent?.kind === "settings" || intent?.kind === "learned") return handleIntent(user, intent);
+
+    // Settings always win over an open walk / pending confirm — never dump these into the brain.
+    if (
+      intent &&
+      (intent.kind === "settings" ||
+        intent.kind === "learned" ||
+        intent.kind === "name" ||
+        intent.kind === "monitoring" ||
+        intent.kind === "contact" ||
+        intent.kind === "escalation" ||
+        intent.kind === "timing")
+    ) {
+      if (p) pending.delete(user.userId);
+      return handleIntent(user, intent);
+    }
 
     if (p?.kind === "confirm") {
-      pending.delete(user.userId);
       const yes = parseYesNo(text);
-      if (yes) {
+      if (yes === true) {
+        pending.delete(user.userId);
         await save(user, p.patch, `settings change confirmed: ${p.summary}`);
         await reply(user, p.saved);
         return;
       }
-      await reply(user, copy.changeCancelled);
-      if (yes === false) return;
-    } else if (p?.kind === "ask") {
+      if (yes === false) {
+        pending.delete(user.userId);
+        await reply(user, copy.changeCancelled);
+        return;
+      }
+      // not yes/no — keep waiting, don't fall through to the walk brain
+      await reply(user, copy.yesOrNo);
+      return;
+    }
+    if (p?.kind === "ask") {
       if (p.editing && isCancel(text)) {
         pending.delete(user.userId);
         await reply(user, copy.changeCancelled);
@@ -389,7 +410,6 @@ export function createInboundRouter(deps: RouterDeps) {
     }
 
     if (!user.onboardedAt) return continueOnboarding(user);
-    if (intent) return handleIntent(user, intent);
 
     await dispatch({
       type: "UserText",

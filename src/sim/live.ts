@@ -130,7 +130,7 @@ export function buildScenario(name: ScenarioName, home: LatLon): Scenario {
         name,
         startWalk: false,
         points: leg.points,
-        description: "walk steadily for 3 min, >150 m from home (should get 'Heading home?')",
+        description: "walk steadily for 3 min, >150 m from home (should get night-out start)",
       };
     }
     case "vehicle": {

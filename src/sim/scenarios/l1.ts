@@ -8,7 +8,7 @@ import { closePool, query } from "../../store/db.ts";
 import { upsertDemoUser, countPings } from "../../store/users.ts";
 import { DEMO, DEMO_ORIGIN } from "../demo.ts";
 import { playRoute, walkingPoints } from "../playback.ts";
-import type { Action, LocationPing, UserReaction, UserText } from "../../shared/types.ts";
+import type { Action, LocationPing, UserText } from "../../shared/types.ts";
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
@@ -79,7 +79,7 @@ async function main() {
   assert(afterR1 > before, "R1: expected pings to increase");
   console.log("R1 ok");
 
-  // --- R2 night prompt ---
+  // --- R2 night auto-start (no 👍 required) ---
   // Stay >150 m from home the whole time (home - 0.003 ≈ 333 m)
   const farOrigin = { lat: DEMO.homeLat - 0.004, lon: DEMO.homeLon };
   const walkPts = walkingPoints(
@@ -107,14 +107,15 @@ async function main() {
       promptActions.push(...(await brain.handle(ping)));
     },
   });
-  const prompts = promptActions.filter(
-    (a) => a.type === "SendText" && a.tag === "prompt",
+  const starts = promptActions.filter(
+    (a) => a.type === "SendText" && a.tag === "started",
   );
-  assert(prompts.length === 1, `R2: expected 1 prompt, got ${prompts.length}`);
+  assert(starts.length === 1, `R2: expected 1 started, got ${starts.length}`);
+  assert(brain.getPhase(DEMO.userId) === "WALKING", "R2: expected WALKING");
   assert((await countRule("R2")) >= 1, "R2: events row missing");
   console.log("R2 ok");
 
-  // R2 again within 2h — no second prompt
+  // R2 again while already walking — no second start
   clock.advance(5 * 60_000);
   const again = await brain.handle({
     type: "LocationPing",
@@ -124,10 +125,11 @@ async function main() {
     lon: farOrigin.lon,
   });
   assert(
-    again.filter((a: Action) => a.type === "SendText" && a.tag === "prompt").length === 0,
-    "R2: second prompt within 2h",
+    again.filter((a: Action) => a.type === "SendText" && a.tag === "started").length === 0,
+    "R2: second start while already walking",
   );
-  console.log("R2 cooldown ok");
+  console.log("R2 no-double-start ok");
+  await brain.resetUser(DEMO.userId);
 
   // --- R2x vehicle ---
   const brain2 = createBrainEngine({ clock, getUser, persist: true });
@@ -157,14 +159,13 @@ async function main() {
     },
   });
   assert(
-    fastActions.filter((a: Action) => a.type === "SendText" && a.tag === "prompt")
+    fastActions.filter((a: Action) => a.type === "SendText" && (a.tag === "prompt" || a.tag === "started"))
       .length === 0,
-    "R2x: vehicle should not prompt",
+    "R2x: vehicle should not start a walk",
   );
   console.log("R2x ok");
 
-  // --- R3 thumbs up on prompted brain ---
-  // Re-prompt path: new engine after cooldown
+  // --- R3: soft-rejoin overdue walk instead of "Still out? Getting worried" ---
   const brain3 = createBrainEngine({ clock, getUser, persist: true });
   clock.set(new Date(nightStart().getTime() + 5 * 60 * 60_000));
   await playRoute({
@@ -176,17 +177,37 @@ async function main() {
       await brain3.handle(ping);
     },
   });
-  assert(brain3.getPhase(DEMO.userId) === "PROMPTED", "R3 setup: PROMPTED");
-  const like: UserReaction = {
-    type: "UserReaction",
+  assert(brain3.getPhase(DEMO.userId) === "WALKING", "R3 setup: WALKING after night start");
+  // Simulate a restart: new engine hydrates the same open walk after it's past lateMin
+  const rt = brain3.getRuntime(DEMO.userId);
+  const lateMin = rt.plan?.lateMin ?? 20;
+  clock.advance((lateMin + 15) * 60_000);
+  const brain3b = createBrainEngine({ clock, getUser, persist: true });
+  const rejoin = await brain3b.handle({
+    type: "LocationPing",
     userId: DEMO.userId,
-    emoji: "👍",
-    targetMessageId: "m1",
     time: clock.now(),
-  };
-  await brain3.handle(like);
-  assert(brain3.getPhase(DEMO.userId) === "WALKING", "R3: expected WALKING");
-  console.log("R3 like ok");
+    lat: farOrigin.lat + 0.002,
+    lon: farOrigin.lon,
+  });
+  assert(brain3b.getPhase(DEMO.userId) === "WALKING", "R3 soft-rejoin: WALKING");
+  assert(
+    rejoin.some(
+      (a: Action) =>
+        a.type === "SendText" &&
+        a.tag === "started" &&
+        /walk you home/i.test(a.text),
+    ),
+    "R3 soft-rejoin: expected nightOut, not worried check-in",
+  );
+  assert(
+    !rejoin.some(
+      (a: Action) => a.type === "SendText" && /getting worried/i.test(a.text),
+    ),
+    "R3 soft-rejoin: must not send worried check-in",
+  );
+  console.log("R3 soft-rejoin ok");
+  await brain3b.resetUser(DEMO.userId);
 
   // --- R4 walk me home at noon ---
   const brain4 = createBrainEngine({ clock, getUser, persist: true });
