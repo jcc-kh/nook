@@ -115,6 +115,16 @@ export function createVonageCalls(opts: {
     }
     const token = Buffer.from(crypto.getRandomValues(new Uint8Array(18))).toString("base64url");
     const wss = voice.publicUrl.replace(/^http/, "ws");
+    sessions.set(token, {
+      userId: action.userId,
+      walkId: action.walkId,
+      vars: callVariables(action, contactName),
+      action,
+      ...(contactName && { contactName }),
+      createdAt: Date.now(),
+      answered: false,
+      settled: false,
+    });
     const res = await fetch(VONAGE_API, {
       method: "POST",
       headers: { authorization: `Bearer ${jwt()}`, "content-type": "application/json" },
@@ -131,24 +141,14 @@ export function createVonageCalls(opts: {
         ],
         event_url: [`${voice.publicUrl}/vonage/event/${token}`],
         ringing_timer: 45,
-        machine_detection: "hangup",
       }),
       signal: AbortSignal.timeout(15_000),
     });
     const body = (await res.json().catch(() => ({}))) as { uuid?: string; title?: string; detail?: string };
     if (!res.ok) {
+      sessions.delete(token);
       throw new Error(`Vonage call failed (${res.status}): ${body.title ?? ""} ${body.detail ?? res.statusText}`.trim());
     }
-    sessions.set(token, {
-      userId: action.userId,
-      walkId: action.walkId,
-      vars: callVariables(action, contactName),
-      action,
-      ...(contactName && { contactName }),
-      createdAt: Date.now(),
-      answered: false,
-      settled: false,
-    });
     console.log(`[vonage] calling ${toNumber} (walk ${action.walkId}, call ${body.uuid ?? "?"})`);
   }
 
@@ -161,7 +161,11 @@ export function createVonageCalls(opts: {
     const token = url.pathname.split("/")[3];
     const session = token ? sessions.get(token) : undefined;
     const event = (await req.json().catch(() => ({}))) as { status?: string; detail?: string };
-    if (!session || !event.status) return Response.json({ ok: true });
+    if (!event.status) return Response.json({ ok: true });
+    if (!session) {
+      console.log(`[vonage] event for an unknown call: ${event.status}`);
+      return Response.json({ ok: true });
+    }
     console.log(`[vonage] ${session.userId} call ${event.status}${event.detail ? ` (${event.detail})` : ""}`);
     if (event.status === "answered") {
       if (!session.answered && !session.settled) void report(session.userId, session.walkId, "started");

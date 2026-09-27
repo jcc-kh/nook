@@ -50,7 +50,7 @@ const TOOLS = [
     type: "webhook",
     name: "get_location",
     description:
-      "Where the caller is: street, coordinates, how old the fix is (ageSec), and whether it's fresh (contextFresh). Use it when they ask where they are. If contextFresh is false, say it's their last known spot, not where they are now.",
+      "Where the caller is: street, coordinates, how old the fix is (ageSec), and whether it's fresh (contextFresh). Call it after they say where they are and what they see, and compare their answer with this fix. If contextFresh is false, say it's their last known spot, not where they are now.",
     response_timeout_secs: 10,
     api_schema: walkOnly("/tools/location"),
   },
@@ -58,7 +58,7 @@ const TOOLS = [
     type: "webhook",
     name: "get_navigation",
     description:
-      "The next walking instruction toward their current destination. The response includes say: speak that line and do not change the place, the minutes, or the turn. Call it when they want directions or after they finish a step. If say says the location is not fresh, ask what street they're on instead of guessing.",
+      "The next walking instruction toward the place they already agreed to. The response includes say: speak that line and do not change the place, the minutes, or the turn. Call it only after set_destination. If it says no place is chosen yet, do not invent one.",
     response_timeout_secs: 20,
     api_schema: walkOnly("/tools/navigation"),
   },
@@ -66,7 +66,7 @@ const TOOLS = [
     type: "webhook",
     name: "get_safe_destinations",
     description:
-      "Up to 3 places open all night near the caller, each with name, walking minutes, and place_id. The response includes say: speak that line, offering at most two places, and do not name a place that is not in it. Use it when they want somewhere to go first.",
+      "Call only after get_location, and only after they have said where they are and what they see. Returns one open place, Morton Williams, with place_id morton-williams. Then suggest it out loud. If they agree, call set_destination with morton-williams.",
     response_timeout_secs: 20,
     api_schema: walkOnly("/tools/safe-destinations"),
   },
@@ -137,7 +137,7 @@ Silence is fine. When they're just walking, you don't need to fill every gap. If
 # What you already know (don't re-ask)
 - Why they called: {{call_reason}} (manual_call: they asked for a call; uneasy_companion: they feel uneasy and want company; navigation_help / lost: they want directions; hands_free_guidance: they want to talk instead of text).
 - How they're feeling: {{safety_state}} (safe, uneasy, or immediate_danger).
-- Where they're heading: {{destination_name}}. Route choice so far: {{route_choice}} (destination = keep heading there, busier = somewhere busier first, none = not decided).
+- You have not picked a place yet. Do not name a store until you have heard where they are, heard what they see, and called get_location.
 - What they told Nook by text or voice note: {{recent_context}}
 - Last known street: {{street}} ({{lat}}, {{lon}}). Minutes walking: {{minutes_walking}}.
 - Their trusted contact: {{contact_name}}.
@@ -149,16 +149,19 @@ Silence is fine. When they're just walking, you don't need to fill every gap. If
 - Only say {{contact_name}} was alerted after report_call_outcome returns contact_alerted true. If it's false, say plainly "My message to {{contact_name}} didn't go through" and tell them to call 911 or {{contact_name}} themselves.
 - Guidance tools return a say line written from the map data. Speak say. Do not change the place name, the minutes, or the turn, and do not add a street or landmark that say does not contain.
 
+# Find them before you suggest a place
+Your first words ask where they are and what they can see. Wait for their answer. Do not name Morton Williams, or any other store, in that first turn.
+Then call get_location. Tell them the street or area in plain words, and say whether it matches what they see.
+Once that lines up, suggest Morton Williams at 2941 Broadway, open all night, and ask if they want to walk there. If they say yes, call set_destination with morton-williams, then get_navigation, and speak the say line. That is the only place you may name.
+
 # Uneasy but not in immediate danger
 Someone walking behind them, a sketchy street, a bad feeling: that's uneasy, not an emergency. Don't alert anyone for it.
-- If route choice is none, ask once: "Do you want to keep heading to {{destination_name}}, or get somewhere busier first?"
-- Busier: call get_safe_destinations, offer at most two by name and walking minutes ("There's a CVS about 3 minutes away, or Tom's Restaurant about 5."). When they pick, call set_destination with its place_id and give the first instruction.
-- Keep heading: call get_navigation and give the next instruction.
+- Still locate them first, then offer Morton Williams.
 - Practical tips, one at a time: stay on the main, well-lit street; keep the phone out; walk toward people and open shops.
 
 # Guiding them
 - One instruction at a time. Speak the tool's say line.
-- Before the lookup, you can say "Yeah, I've got you. Let me find somewhere nearby." Then call the tool in that same turn.
+- After they agree to Morton Williams, call get_navigation and speak the new say line.
 - After they say they've done a step, or every minute or so, call get_navigation again and speak the new say line.
 - If say is missing, or instruction is null, or navigationFresh is false, don't guess turns. Say you're not getting a fresh location and ask what street they're on or what they can see.
 - When arrived is true, say so warmly. If it's a busier stop, ask if they want to wait there a bit or keep going.
@@ -168,7 +171,7 @@ Attacked, grabbed, chased, threatened, a weapon, hurt, someone won't let them le
 1. Say: "Call 911 now. I'm sending your location to {{contact_name}}." On iPhone, holding the side button and a volume button brings up Emergency SOS.
 2. Immediately report request_escalation with situation set to what's happening, in their own words, in one short sentence.
 3. Stay calm and stay with them: short, direct lines ("Go toward the lights and people.", "Get inside the nearest open store."). Don't tell them to hang up on you.
-If you're not sure whether it's an emergency, ask one yes-or-no question: "Are you in danger right now?" If yes, do the steps above. If they can't talk freely, keep it to yes/no questions; if they say no, or can't answer, treat it as immediate danger.
+If you're not sure whether it's an emergency, ask one yes-or-no question: "Are you in danger right now?" If yes, do the steps above. A call they asked for, silence, or talking about where they are is not danger. Do not tell them to call 911 unless they clearly say they are being hurt, chased, threatened, or in danger right now.
 
 # Other situations
 - They ask you to call the police: you can't place calls; they should call 911 now. Say it once, clearly.
@@ -241,7 +244,7 @@ function agentBody(toolIds: string[]) {
             recent_context: "nothing yet",
             lat: "40.80397",
             lon: "-73.96685",
-            opening_line: "Hey, I'm here. You okay right now?",
+            opening_line: "Hey, I'm here. Where are you right now, and what can you see around you?",
           },
         },
         prompt: {

@@ -366,7 +366,11 @@ const server = Bun.serve<BridgeSocket["data"], never>({
     const url = new URL(req.url);
     if (vonageCalls && url.pathname.startsWith("/vonage/ws/")) {
       const data = vonageCalls.upgradeData(url);
-      if (!data) return new Response("not found", { status: 404 });
+      if (!data) {
+        console.log("[vonage] audio connection rejected");
+        return new Response("not found", { status: 404 });
+      }
+      console.log("[vonage] audio connection opened");
       return srv.upgrade(req, { data }) ? undefined : new Response("upgrade failed", { status: 400 });
     }
     if (vonageCalls && url.pathname.startsWith("/vonage/event/")) return vonageCalls.handleEvent(req, url);

@@ -101,8 +101,9 @@ function speechFacts(data: unknown): SpeechFacts | null {
       ? (rec.destination as { name: string }).name
       : null;
   const tail = minutes != null && minutes > 0 ? ` About ${minutes} minutes left.` : "";
+  const lead = dest ? `Heading to ${dest}. ` : "";
   return {
-    fallback: `${instruction}${tail}`,
+    fallback: `${lead}${instruction}${tail}`,
     mustInclude: [instruction, ...(minutes != null && minutes > 0 ? [String(minutes)] : []), ...(dest ? [dest] : [])],
     allowModel: true,
     brief: [dest && `Going to ${dest}.`, instruction, minutes != null ? `${minutes} minutes left.` : ""]

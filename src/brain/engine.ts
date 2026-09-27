@@ -58,7 +58,7 @@ import {
   type WalkSafetyPatch,
 } from "../store/walks.ts";
 import { copy } from "../messenger/copy.ts";
-import { guideToSafePlace, SAFE_PLACE } from "../voice/safePlace.ts";
+import { SAFE_PLACE } from "../voice/safePlace.ts";
 import { parseCoordinates, parseMapsLink, parseYesNo } from "../messenger/parse.ts";
 import { query } from "../store/db.ts";
 import { classifyFallback as classifyText, reactionIntent } from "../llm/classify.ts";
@@ -208,6 +208,8 @@ interface UserRuntime {
   callOffered: boolean;
   callReason: CallReason | null;
   callAnswered: boolean;
+  /** True only if this call reported immediate danger. A plain "call me" does not set it. */
+  callEscalated: boolean;
   /** Last few things the user said. Memory only; also written to the events table. */
   recentStatements: Statement[];
   pendingActions: Action[];
@@ -262,6 +264,7 @@ function emptyRuntime(): UserRuntime {
     callOffered: false,
     callReason: null,
     callAnswered: false,
+    callEscalated: false,
     recentStatements: [],
     pendingActions: [],
   };
@@ -282,6 +285,7 @@ function resetTripSafety(rt: UserRuntime) {
   rt.callOffered = false;
   rt.callReason = null;
   rt.callAnswered = false;
+  rt.callEscalated = false;
   rt.destNearCount = 0;
 }
 
@@ -586,33 +590,10 @@ function placeLine(p: SafePlaceOption): string {
   return `${p.rank}. ${p.name} (${p.category}, ${open}, ~${p.walkMin} min walk)`;
 }
 
-function openingLine(
-  name: string | undefined,
-  reason: CallReason,
-  rt: UserRuntime,
-): string {
+function openingLine(name: string | undefined, reason: CallReason, rt: UserRuntime): string {
   const hey = name ? `Hey ${name}, I'm here.` : "Hey, I'm here.";
-  const dest = tripDestinationName(rt);
-  const toDest = dest === "home" ? "home" : `to ${dest}`;
-  if (rt.safety === "immediate_danger") return `${hey} Are you somewhere safe right now?`;
-  if (rt.interim?.name === SAFE_PLACE.name) {
-    const last = rt.lastPing;
-    const guide = last ? guideToSafePlace(last.lat, last.lon) : null;
-    return guide ? `${hey} ${guide.say.join(" ")}` : `${hey} There's a Morton Williams open all night. I'll walk you there.`;
-  }
-  switch (reason) {
-    case "uneasy_companion":
-    case "hands_free_guidance":
-      if (rt.routeChoice === "busier" && rt.interim) return `${hey} Let's get you to ${rt.interim.name}.`;
-      if (rt.routeChoice === "destination") return `${hey} Let's keep heading ${toDest} together.`;
-      return `${hey} Do you want to keep heading ${toDest}, or get somewhere busier first?`;
-    case "lost":
-    case "navigation_help":
-      return `${hey} Let me check where you are.`;
-    case "manual_call":
-    default:
-      return `${hey} You okay right now?`;
-  }
+  if (rt.safety === "immediate_danger" && reason !== "manual_call") return `${hey} Are you somewhere safe right now?`;
+  return `${hey} Where are you right now, and what can you see around you?`;
 }
 
 function ageLabel(at: Date, now: Date): string {
@@ -1409,16 +1390,11 @@ export function createBrainEngine(deps: BrainDeps) {
   }
 
   function startCall(rt: UserRuntime, user: UserRecord, now: Date, reason: CallReason) {
-    // Demo: every call walks them to the hardcoded Morton Williams pin.
-    rt.interim = {
-      name: SAFE_PLACE.name,
-      lat: SAFE_PLACE.lat,
-      lon: SAFE_PLACE.lon,
-      address: SAFE_PLACE.address,
-      source: "safe_place",
-    };
-    rt.routeChoice = "busier";
+    // Don't name a place until the call has asked where they are and checked the fix.
+    rt.interim = null;
+    rt.routeChoice = null;
     rt.destNearCount = 0;
+    rt.callEscalated = false;
     rt.phase = "CALLING";
     rt.channel = "voice";
     rt.callReason = reason;
@@ -1723,6 +1699,12 @@ export function createBrainEngine(deps: BrainDeps) {
           ? "uneasy_companion"
           : "manual_call";
     if (reason === "uneasy_companion" && rt.safety === "safe") await setSafety(rt, "uneasy");
+    // A plain "call me" is not an emergency. A stuck danger flag was texting them to call 911.
+    if (reason === "manual_call" && rt.safety === "immediate_danger") {
+      await setSafety(rt, "safe");
+      rt.dangerWindow = null;
+      rt.emergencyAlerted = false;
+    }
     rt.dangerConfirm = null;
     rt.awaitingRouteChoice = false;
     if (!callsEnabled()) {
@@ -2087,6 +2069,7 @@ export function createBrainEngine(deps: BrainDeps) {
       const sameWalk = rt.walkId === event.walkId;
       const call: Statement = { text: event.situation?.trim() || "", source: "voice_call", at: now };
       if (event.callType === "request_escalation") {
+        rt.callEscalated = true;
         // Safety first: act even if the call isn't tied to the current walk.
         await applyIntent(rt, user, {
           kind: "danger",
@@ -2116,7 +2099,7 @@ export function createBrainEngine(deps: BrainDeps) {
         rt.channel = "text";
         rt.callAnswered = false;
         if (rt.phase !== "CALLING") return rt.pendingActions;
-        if (rt.safety === "immediate_danger") {
+        if (rt.callEscalated && rt.safety === "immediate_danger") {
           rt.phase = "ALERTED";
           send(rt, user.userId, "checkin", copy.dangerStill(user.trustedContact?.name));
         } else {
@@ -2316,6 +2299,14 @@ export function createBrainEngine(deps: BrainDeps) {
   async function navigationFor(rt: UserRuntime, user: UserRecord, now: Date) {
     const last = rt.lastPing;
     if (!deps.nav || !last || !rt.walkId) return { ok: false, error: "no live location" };
+    const destination = rt.interim;
+    if (!destination) {
+      return {
+        ok: false,
+        needs_location: true,
+        say: "No place chosen yet. Ask where they are and what they see, call get_location, then suggest a place.",
+      };
+    }
     return deps.nav.navigationUpdate({
       key: rt.walkId,
       position: {
@@ -2325,7 +2316,7 @@ export function createBrainEngine(deps: BrainDeps) {
         ...(last.accuracyM != null && { accuracyM: last.accuracyM }),
         ...(last.shortAddress && { street: last.shortAddress }),
       },
-      destination: activeTarget(rt, user),
+      destination,
       now,
     });
   }
