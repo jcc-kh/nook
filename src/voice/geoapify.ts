@@ -15,6 +15,9 @@ export interface NearbyPlace {
   lon: number;
   distanceM: number;
   categories: string[];
+  placeId?: string;
+  /** OSM opening_hours, when Place Details had one. */
+  openingHours?: string;
 }
 
 export interface RouteStep {
@@ -37,17 +40,24 @@ export interface WalkingRoute {
 }
 
 const PLACES = "https://api.geoapify.com/v2/places";
+const PLACE_DETAILS = "https://api.geoapify.com/v2/place-details";
 const ROUTING = "https://api.geoapify.com/v1/routing";
 
-/** Staffed, public, easy to recognize at night. Parent keys include their children. */
+/**
+ * Places someone can actually walk into at night. Cafes and restaurants are
+ * left out; hours still have to say 24/7 before one is chosen.
+ */
 const CATEGORIES = [
-  "commercial.health_and_beauty.pharmacy",
-  "healthcare.pharmacy",
   "commercial.convenience",
   "commercial.supermarket",
-  "catering.cafe",
-  "catering.fast_food",
+  "commercial.gas",
+  "commercial.health_and_beauty.pharmacy",
+  "healthcare.pharmacy",
+  "healthcare.hospital",
+  "service.police",
+  "service.vehicle.fuel",
   "accommodation.hotel",
+  "catering.fast_food",
   "public_transport.subway",
 ];
 
@@ -65,9 +75,17 @@ const PREFER: [string, number][] = [
 /** Try a short walk first, then a few blocks, so a nearby store beats a far one. */
 const RADII_M = [500, 1200];
 
+/** OSM opening_hours values that mean the place does not close. */
+export function isAlwaysOpen(hours: string | undefined): boolean {
+  if (!hours) return false;
+  const h = hours.trim().toLowerCase().replace(/\s+/g, " ");
+  if (h.includes("24/7") || h === "24 hours") return true;
+  return /^(?:(?:mo-su|su-sa|daily)(?:,ph)?\s+|ph,mo-su\s+)?00:00-24:00$/.test(h);
+}
+
 /**
- * Walk-test log. Prints the live fix and the places Geoapify returned around it,
- * nearest first. Stops at the first radius that has results.
+ * Walk-test log. Prints the live fix, the nearest candidates, and which one
+ * is actually open 24/7.
  */
 export async function logNearbyPlaces(
   here: LatLon & { accuracyM?: number; kind?: string },
@@ -82,28 +100,43 @@ export async function logNearbyPlaces(
   }
   for (const radius of RADII_M) {
     const found = [...(await searchPlaces(apiKey, here, radius))].sort((a, b) => a.distanceM - b.distanceM);
-    console.log(`[maps] geoapify ${found.length} named places within ${radius}m`);
-    for (const place of found.slice(0, 8)) {
+    const checked = await withHours(apiKey, found.slice(0, 8));
+    console.log(`[maps] geoapify ${found.length} places within ${radius}m; hours on the nearest ${checked.length}`);
+    for (const place of checked) {
       const feet = Math.round(place.distanceM * 3.28084);
       const category = place.categories.find((c) => c.includes(".")) ?? place.categories[0] ?? "";
+      const hours = place.openingHours ?? "no hours";
+      const flag = isAlwaysOpen(place.openingHours) ? "  24/7" : "";
       console.log(
-        `[maps]   ${Math.round(place.distanceM)}m ${feet}ft  ${place.name}  ${place.lat.toFixed(5)},${place.lon.toFixed(5)}  ${category}`,
+        `[maps]   ${Math.round(place.distanceM)}m ${feet}ft  ${place.name}  ${place.lat.toFixed(5)},${place.lon.toFixed(5)}  ${category}  ${hours}${flag}`,
       );
     }
-    if (found.length > 8) console.log(`[maps]   … ${found.length - 8} more`);
-    if (found.length > 0) return;
+    if (found.length > checked.length) console.log(`[maps]   … ${found.length - checked.length} more, hours not checked`);
+    const open = checked.filter((p) => isAlwaysOpen(p.openingHours)).sort((a, b) => a.distanceM - b.distanceM);
+    const nearest = open[0];
+    if (nearest) {
+      console.log(`[maps] 24/7 nearest: ${nearest.name} ${Math.round(nearest.distanceM)}m`);
+      return;
+    }
+    if (found.length > 0) console.log(`[maps] no 24/7 place in the nearest ${checked.length}; widening the search`);
   }
+  console.log("[maps] no 24/7 place found");
 }
 
+/** Nearest place whose opening hours say it is open all night. */
 export async function findNearbySafePlace(
   apiKey: string,
   here: LatLon,
   excludeName?: string,
 ): Promise<NearbyPlace | null> {
+  const skip = excludeName?.trim().toLowerCase();
   for (const radius of RADII_M) {
-    const found = await searchPlaces(apiKey, here, radius);
-    const pick = choosePlace(found, excludeName);
-    if (pick) return pick;
+    const found = [...(await searchPlaces(apiKey, here, radius))]
+      .filter((p) => p.name.toLowerCase() !== skip)
+      .sort((a, b) => a.distanceM - b.distanceM);
+    const checked = await withHours(apiKey, found.slice(0, 8));
+    const open = checked.filter((p) => isAlwaysOpen(p.openingHours)).sort((a, b) => a.distanceM - b.distanceM);
+    if (open[0]) return open[0];
   }
   return null;
 }
@@ -190,6 +223,7 @@ async function searchPlaces(apiKey: string, here: LatLon, radius: number): Promi
       lon,
       distanceM: num(props?.distance) ?? 0,
       categories: Array.isArray(props?.categories) ? props.categories.filter((c): c is string => typeof c === "string") : [],
+      ...(typeof props?.place_id === "string" && { placeId: props.place_id }),
     });
   }
   return places;
@@ -238,6 +272,51 @@ function toPoints(line: unknown[]): LatLon[] {
     points.push({ lat, lon });
   }
   return points;
+}
+
+const HOURS_CHECKED = 8;
+
+async function withHours(apiKey: string, places: NearbyPlace[]): Promise<NearbyPlace[]> {
+  const batch = places.slice(0, HOURS_CHECKED);
+  return Promise.all(
+    batch.map(async (place) => {
+      if (!place.placeId) return place;
+      try {
+        const openingHours = await fetchOpeningHours(apiKey, place.placeId);
+        return openingHours ? { ...place, openingHours } : place;
+      } catch (err) {
+        console.error(`[maps] hours for ${place.name} failed`, err instanceof Error ? err.message : err);
+        return place;
+      }
+    }),
+  );
+}
+
+async function fetchOpeningHours(apiKey: string, placeId: string): Promise<string | undefined> {
+  const url = new URL(PLACE_DETAILS);
+  url.searchParams.set("id", placeId);
+  url.searchParams.set("features", "details");
+  url.searchParams.set("apiKey", apiKey);
+  return findOpeningHours(await getJson(url));
+}
+
+function findOpeningHours(value: unknown, depth = 0): string | undefined {
+  if (depth > 6 || value == null) return undefined;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findOpeningHours(item, depth + 1);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (typeof value !== "object") return undefined;
+  const rec = value as Record<string, unknown>;
+  if (typeof rec.opening_hours === "string" && rec.opening_hours.trim()) return rec.opening_hours.trim();
+  for (const child of Object.values(rec)) {
+    const found = findOpeningHours(child, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 async function getJson(url: URL): Promise<unknown> {

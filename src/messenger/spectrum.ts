@@ -1,4 +1,4 @@
-import { reply, Spectrum, type Content, type Message, type Space } from "spectrum-ts";
+import { Spectrum, type Content, type Space } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
 import { terminal } from "spectrum-ts/providers/terminal";
 import { templateForTag } from "../shared/templates.ts";
@@ -104,16 +104,14 @@ export async function createSpectrumMessenger(
   const voice = voiceConfigFromEnv();
   const spaces = new Map<string, Space>();
   const lastIdByTag = new Map<string, Map<SendTextTag, string>>();
-  /** The user's in-thread message currently being handled; our replies go into that thread. */
-  const threads = new Map<string, Message>();
   const lastAlerts = new Map<string, ContactAlertResult>();
   /** Drop identical back-to-back sends (Spectrum / reconnect weirdness). */
   const recentSend = new Map<string, { text: string; at: number }>();
-  const SEND_DEDUP_MS = 30_000;
+  const SEND_DEDUP_MS = 60_000;
   /** Inbound message ids already handled. Stream reconnects can redeliver the same one. */
   const seenInbound = new Set<string>();
   const recentInbound = new Map<string, number>();
-  const INBOUND_DEDUP_MS = 8_000;
+  const INBOUND_DEDUP_MS = 60_000;
 
   async function openDm(handle: string): Promise<Space | undefined> {
     if (!imApp) return undefined;
@@ -145,24 +143,7 @@ export async function createSpectrumMessenger(
       console.warn(`[messenger] no space for ${userId}; dropping: ${text}`);
       return {};
     }
-    const thread = threads.get(userId);
-    if (thread) {
-      try {
-        const sent = await space.send(reply(text, thread));
-        // Spectrum sometimes returns no id even though the threaded send landed —
-        // never fall through to a second main-chat send or the user gets doubles.
-        return sent?.id ? { messageId: sent.id } : {};
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        // These throw inside reply() before anything is delivered.
-        const beforeSend = /reply\(\) (target is undefined|requires content|cannot wrap)/.test(msg);
-        if (!beforeSend) {
-          console.warn(`[messenger] threaded reply to ${userId} failed; not sending a second copy`, err);
-          return {};
-        }
-        console.warn(`[messenger] threaded reply to ${userId} failed before send; sending in the main chat`, err);
-      }
-    }
+    // A threaded reply shows up twice on iMessage (in the thread and again in the chat).
     const sent = await space.send(text);
     return sent?.id ? { messageId: sent.id } : {};
   }
@@ -288,7 +269,7 @@ export async function createSpectrumMessenger(
         console.log(`[messenger] ignoring ${content.type} message from ${user.userId}`);
         continue;
       }
-      const inboundKey = `${handle}\0${text}`;
+      const inboundKey = `${handle}\0${text.trim().toLowerCase()}`;
       const inboundAt = Date.now();
       const prevInbound = recentInbound.get(inboundKey);
       recentInbound.set(inboundKey, inboundAt);
@@ -296,18 +277,13 @@ export async function createSpectrumMessenger(
         console.log(`[messenger] dedup skip replayed inbound from ${handle}`);
         continue;
       }
-      if (content.type !== "reply") {
-        yield { ...base, kind: "text", messageId: message.id, text };
-        continue;
-      }
-      // The consumer handles each message before pulling the next, so the
-      // thread stays set exactly while this message's replies are sent.
-      threads.set(user.userId, message);
-      try {
-        yield { ...base, kind: "text", messageId: message.id, text, threadTargetId: content.target.id };
-      } finally {
-        threads.delete(user.userId);
-      }
+      yield {
+        ...base,
+        kind: "text",
+        messageId: message.id,
+        text,
+        ...(content.type === "reply" && { threadTargetId: content.target.id }),
+      };
     }
   }
 

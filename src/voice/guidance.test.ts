@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { distanceM } from "../shared/geo.ts";
-import { choosePlace, parseWalkingRoute, type NearbyPlace } from "./geoapify.ts";
+import { choosePlace, isAlwaysOpen, parseWalkingRoute, type NearbyPlace } from "./geoapify.ts";
 import { locateOnRoute, OFF_ROUTE_M, type ActiveGuidance } from "./guidance.ts";
 
 /** ~meters north of a lat, at this latitude. */
@@ -86,6 +86,15 @@ describe("locateOnRoute", () => {
     const where = locateOnRoute(state, state.destination);
     expect(where.arrived).toBe(true);
     expect(where.instruction).toContain("CVS Pharmacy");
+  });
+});
+
+describe("isAlwaysOpen", () => {
+  test("accepts all-night hours and rejects a closing time", () => {
+    expect(isAlwaysOpen("24/7")).toBe(true);
+    expect(isAlwaysOpen("Mo-Su 00:00-24:00")).toBe(true);
+    expect(isAlwaysOpen("Mo-Fr 07:00-23:00")).toBe(false);
+    expect(isAlwaysOpen(undefined)).toBe(false);
   });
 });
 

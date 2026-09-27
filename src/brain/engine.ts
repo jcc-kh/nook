@@ -1268,7 +1268,12 @@ export function createBrainEngine(deps: BrainDeps) {
         brainLog(deps, "intent=greeting skip R9b");
         if (rt.phase === "PROMPTED") {
           send(rt, user.userId, "prompt", copy.greetingPrompted);
-        } else if (rt.phase === "WALKING" || rt.phase === "CHECKING_IN") {
+        } else if (
+          rt.phase === "WALKING" ||
+          rt.phase === "CHECKING_IN" ||
+          rt.phase === "ALERTED" ||
+          rt.phase === "CALLING"
+        ) {
           send(rt, user.userId, "nudge", copy.greetingWalking);
         } else {
           send(rt, user.userId, "prompt", copy.greetingIdle);

@@ -163,7 +163,7 @@ async function startGuidance(
     return {
       ok: false,
       status: "no_place",
-      say: ["I couldn't find a nearby place from here. Walk another block and I'll look again."],
+      say: ["I couldn't find a place open all night from here. Walk another block and I'll look again."],
     };
   }
 
@@ -233,7 +233,7 @@ function spoken(
 
   const say = alreadyIntroduced
     ? [where.instruction]
-    : [`There's a ${destination} about ${minutesPhrase(where.etaMinutes)} away.`, where.instruction];
+    : [`There's a ${destination} open all night, about ${minutesPhrase(where.etaMinutes)} away.`, where.instruction];
   state.introduced = true;
   return {
     ok: true,
